@@ -9,18 +9,18 @@ Generate today's curated digest message. Before curating, the **Librarian Agent*
 ### Steps
 
 1. **Orient yourself:**
-   - Read `~/wiki/SCHEMA.md` — understand the wiki structure
-   - Read `~/wiki/TASTE.md` — user preferences and relevance signals
-   - Read `~/wiki/index.md` — current wiki catalog
-   - Read `~/wiki/log.md` — recent librarian activity
+   - Read `~/vault/CLAUDE.md` — understand the wiki structure
+   - Read `~/vault/wiki/TASTE.md` — user preferences and relevance signals
+   - Read `~/vault/index.md` — current wiki catalog
+   - Read `~/vault/log.md` — recent librarian activity
 
 2. **Check user context:**
-   - Read all files in `~/wiki/user/focuses/` — these are current high-priority interests
-   - Read all `~/wiki/research/*/STATUS.md` files — these are active research projects
-   - Read `~/wiki/user/interests.md` and `~/wiki/user/profile.md` if they exist
+   - Read all files in `~/vault/wiki/user/focuses/` — these are current high-priority interests
+   - Read all `~/vault/wiki/research/*/STATUS.md` files — these are active research projects
+   - Read `~/vault/wiki/user/interests.md` and `~/vault/wiki/user/profile.md` if they exist
 
 3. **Read today's raw articles:**
-   - Read `~/wiki/raw/articles/YYYY-MM-DD.md`
+   - Read `~/vault/raw/YYYY-MM-DD-articles.md`
    - See what the librarian created/updated (from log.md)
 
 4. **Curate the digest:**
@@ -50,6 +50,7 @@ Generate today's curated digest message. Before curating, the **Librarian Agent*
 
 6. **Append to log.md:**
    `## [YYYY-MM-DD] query | Daily digest curated — N highlights from M articles`
+   Append to `~/vault/log.md`
 
 ## Rules
 

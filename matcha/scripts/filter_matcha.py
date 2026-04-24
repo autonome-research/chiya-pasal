@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""filter_matcha.py - Merge and deduplicate RSS + API articles for wiki/raw/articles/YYYY-MM-DD.md
+"""filter_matcha.py - Merge and deduplicate RSS + API articles for VAULT_DIR/raw/inbox/YYYY-MM-DD-articles.md
 
 Only deduplicates. Scoring/curating is handled by the agent during curation.
-Appends new articles to the daily raw intake file (accumulates all day).
+Writes to VAULT_DIR/raw/inbox/ (vault ingest drop zone) so the scheduled ingest sweep
+picks it up automatically. The ingest moves it to raw/ after integration.
+
+VAULT_DIR env var points to the target vault (default: ~/vault).
 """
 import os
 import re
@@ -15,15 +18,16 @@ from difflib import SequenceMatcher
 # Configuration
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MATCHA_DIR = os.path.dirname(SCRIPT_DIR)
+VAULT_DIR = os.environ.get("VAULT_DIR", os.path.expanduser("~/vault"))
 TODAY = datetime.now().strftime("%Y-%m-%d")
 
 # Inputs
 RAW_DIGEST_PATH = os.path.join(MATCHA_DIR, "output", f"matcha-digest-{TODAY}.md")
 API_ARTICLES_PATH = os.path.join(SCRIPT_DIR, "api-articles.jsonl")
 
-# Output — wiki raw articles (accumulates all day)
-RAW_ARTICLES_DIR = os.path.expanduser("~/wiki/raw/articles")
-RAW_ARTICLES_PATH = os.path.join(RAW_ARTICLES_DIR, f"{TODAY}.md")
+# Output — vault raw/inbox/ (ingest drop zone)
+RAW_INBOX_DIR = os.path.join(VAULT_DIR, "raw", "inbox")
+RAW_ARTICLES_PATH = os.path.join(RAW_INBOX_DIR, f"{TODAY}-articles.md")
 
 
 def load_api_articles(api_path):
@@ -155,15 +159,22 @@ def main():
         print("\n✅ Nothing new to add.")
         return
 
-    # Append to daily raw articles file
-    os.makedirs(RAW_ARTICLES_DIR, exist_ok=True)
+    # Append to daily raw articles file in vault inbox
+    os.makedirs(RAW_INBOX_DIR, exist_ok=True)
     file_is_new = not os.path.exists(RAW_ARTICLES_PATH)
 
     with open(RAW_ARTICLES_PATH, 'a') as f:
         if file_is_new:
-            # Write header for new file
+            # Write header with vault-contributor frontmatter
+            f.write(f"---\n")
+            f.write(f"source: matcha-pipeline\n")
+            f.write(f"clipped: {datetime.now().isoformat()}\n")
+            f.write(f"contributor: scheduled:rss-feed\n")
+            f.write(f"type: article\n")
+            f.write(f"tags: [auto-collected, research]\n")
+            f.write(f"---\n\n")
             f.write(f"# Raw Articles — {TODAY}\n\n")
-            f.write(f"> Auto-collected from matcha RSS + API pipeline. Deduplicated. Not yet curated.\n\n")
+            f.write(f"> Auto-collected from matcha RSS + API pipeline. Deduplicated. Awaiting ingest.\n\n")
 
         # Get sections from new articles for grouping
         by_section = defaultdict(list)
