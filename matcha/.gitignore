@@ -1,0 +1,4 @@
+/collect.lock
+/output
+scripts/api-articles.jsonl
+scripts/api-digest.md

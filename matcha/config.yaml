@@ -1,16 +1,12 @@
-markdown_dir_path: /home/velvet/matcha/output
+markdown_dir_path: /home/velvet/chiya-library/matcha/output
 feeds:
-  # ===== Verified Working RSS Feeds from research-source-map.md =====
-  # 
-  # NOTE on Top-10 universal sources: Most rank-1–3 sources (Semantic Scholar, 
-  # OpenAlex, CrossRef, NCBI, Europe PMC, INSPIRE-HEP, Google Patents, Zenodo) 
-  # are API-only and DON'T provide RSS feeds. They've been documented in
-  # /home/velvet/research-source-map.md for programmatic integration via the 
-  # filter_matcha.py script or a custom ingestion pipeline. What follows below
-  # are only feeds that RETURN actual RSS/Atom XML.
+  # ===== Verified Working RSS Feeds =====
   #
-  
-  # ===== arXiv (Rank 1 — 2.4M papers, all STEM, daily) =====
+  # NOTE: Most top sources (Semantic Scholar, OpenAlex, CrossRef, NCBI,
+  # Europe PMC, INSPIRE-HEP, Google Patents, Zenodo) are API-only — no RSS.
+  # Documented in /home/velvet/research-source-map.md for programmatic use.
+
+  # ===== arXiv (2.4M papers, all STEM, daily) =====
   - http://export.arxiv.org/rss/cs.AI 20
   - http://export.arxiv.org/rss/cs.LG 20
   - http://export.arxiv.org/rss/cs.CV 15
@@ -30,141 +26,93 @@ feeds:
   - http://export.arxiv.org/rss/cs.CR 10
   - http://export.arxiv.org/rss/physics.app-ph 8
   - http://export.arxiv.org/rss/physics.soc-ph 8
-  
-  # ===== Nature Portfolio (Rank 8 — verified RSS works for these journals) =====
+
+  # ===== Nature Portfolio (verified working) =====
   - https://www.nature.com/nature/current.rss 15
   - https://www.nature.com/nphys/current.rss 10
   - https://www.nature.com/nbt/current.rss 10
   - https://www.nature.com/nmat/current.rss 10
   - https://www.nature.com/ncomms/current.rss 10
-  - https://www.nature.com/natureelectronics/current.rss 10
   - https://www.nature.com/natmachintell/current.rss 10
-  - https://www.nature.com/natenergy/current.rss 10
   - https://www.nature.com/nclimate/current.rss 10
   - https://www.nature.com/neuro/current.rss 8
   - https://www.nature.com/nmeth/current.rss 8
-  - https://www.nature.com/s41591-0/current.rss 8
   - https://www.nature.com/nrclinonc/current.rss 8
-  - https://www.nature.com/ncommsmat/current.rss 8
-  
-  # ===== Science (Rank 8) =====
+  # Dead (404): natureelectronics, natenergy, s41591-0, ncommsmat
+
+  # ===== Science =====
   - https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=science 15
-  - https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=scienceimmunology 10
   - https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=scirobotics 10
-  - https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=scitranslmed 10
-  - https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=scienceadvances 10
-  
-  # ===== DOAJ (Rank 9 — Open Access aggregator, 13,000+ journals) =====
+  # Dead (404): scienceimmunology, scitranslmed, scienceadvances
+
+  # ===== DOAJ (Open Access aggregator) =====
   - https://doaj.org/feed 10
-  
+
   # ===== Cell Press =====
   - https://www.cell.com/action/showFeed?type=etoc&feed=rss&jc=cell 10
-  - https://www.cell.com/action/showFeed?type=etoc&feed=rss&jc=critrev 8
   - https://www.cell.com/action/showFeed?type=etoc&feed=rss&jc=immunity 8
-  - https://www.cell.com/action/showFeed?type=etoc&feed=rss&jc=molecule 8
   - https://www.cell.com/action/showFeed?type=etoc&feed=rss&jc=neuron 8
-  - https://www.cell.com/action/showFeed?type=etoc&feed=rss&jc=trendsincognitive 8
-  
-  # ===== PNAS =====
-  - https://www.pnas.org/rss/current_issues.xml 12
-  
+  # Dead (404): critrev, molecule, trendsincognitive
+
   # ===== IEEE Xplore =====
-  - https://ieee-nlp-services.s3.amazonaws.com/rss_feeds/ieee_Xplore_Computer_Science.xml 10
-  - https://ieee-nlp-services.s3.amazonaws.com/rss_feeds/ieee_Xplore_Artificial_Intelligence.xml 10
-  
+  # Dead (404): ieee_Xplore_Computer_Science.xml, ieee_Xplore_Artificial_Intelligence.xml
+
   # ===== ACM Digital Library =====
-  - https://feeds.acm.org/publications/rss/artnews?col=dsigai 10
-  - https://feeds.acm.org/publications/rss/artnews?col=dsigact 8
-  
-  # ===== JHEP (Journal of High Energy Physics) =====
-  - https://cms.journalofhighenergypysics.com/feed 8
-  
-  # ===== OSTI.GOV (DOE — Topic 16 — Federal research output, 4M+ records) =====
-  - https://www.osti.gov/rss/home.rss 12
+  # Dead (DNS): feeds.acm.org
 
-  # ===== NCBI/PubMed (Topic 21 — Medical, preprint servers) =====
-  - https://pubmed.ncbi.nlm.nih.gov/action/showFeed?tool=Feedly&format=rss&id=pubmed 10
+  # ===== AI/ML Conference feeds =====
+  # Dead (404/expired): NeurIPS/ICLR/ICML 2024 schedules, alignmentforum, lesswrong
 
-  # ===== NeurIPS/ICLR (Topic 4 — AI/ML community feeds) =====
-  - https://neurips.cc/Conferences/2024/ScheduleRss 8
-  - https://iclr.cc/virtual/2024/rss 8
-  - https://icml.cc/virtual/2024/rss 8
-  - https://www.alignmentforum.org/rss.xml 10
-  - https://www.lesswrong.com/rss.xml 8
-  
-  # ===== Medical (Topic 21) =====
-  - https://www.biorxiv.org/rss 15
-  - https://www.medrxiv.org/rss 15
-  - https://feeds.thelancet.com/rss/feed/briefings 10
-  - https://www.nejm.org/rss/clinical 10
-  - https://www.ncbi.nlm.nih.gov/research/rss/pmc.xml 10
-  
-  # ===== Physics (Topic 22) =====
-  - https://journals.aps.org/rss 10
-  - https://inspirehep.net/rss 10
-  - https://cern.ch/rss/breaking-news 8
-  
-  # ===== Cybersecurity (Topic 18) =====
-  - https://eprint.iacr.org/rss.xml 15
-  - https://www.cisa.gov/rss 10
-  - https://www.usenix.org/conference/rss 10
-  
-  # ===== Open Source (Topic 17) =====
-  - https://joss.theoj.org/rss.xml 8
-  - https://github.com/trending/rss 10
-  - https://github.com/advisories/feed 10
-  - https://www.apache.org/feeds/rss.xml 8
-  
-  # ===== Economics (Topic 6) =====
-  - https://www.nber.org/rss/rss.xml 8
-  - https://www.ssrn.com/index.cfm/en/feed/rss 8
-  
-  # ===== Robotics (Topic 5) =====
-  - https://arxiv.org/rss/cs.RO 10
-  
-  # ===== Surveillance/Digital Rights (Topic 19) =====
-  - https://www.eff.org/rss/updates.xml 8
-  - https://epic.org/feed/ 8
-  - https://www.surveillanceandociety.org/rss.xml 8
-  
-  # ===== Defense/Warfare (Topic 20) =====
-  - https://www.rusi.org/expert-comment/feed 8
-  - https://www.understandingwar.org/feed/ 10
-  - https://www.sipri.org/feed.xml 10
-  
-  # ===== Government Research (Topic 12) =====
-  - https://www.rand.org/rss/randrss.xml 8
-  
-  # ===== Tech Policy & Analysis =====
-  - https://www.brookings.edu/topictag/technology/feed/ 10
-  - https://www.csis.org/feeds/49.xml 8
-  - https://www.newamerica.org/cybersecurity-and-technology/feed/ 10
-  - https://www.pewresearch.org/topic/technology/feed/ 10
-  
-  # ===== More AI/ML Labs =====
-  - https://google-research.github.io/blog/feed/ 10
-  - https://ai.meta.com/blog/feed/ 10
+  # ===== AI/ML Lab blogs (working) =====
   - https://blog.research.google/feeds/posts/default?alt=rss 8
   - https://www.microsoft.com/en-us/research/feed/ 10
   - https://openai.com/blog/rss.xml 8
-  
-  # ===== EXISTING CORE FEEDS ======
+  - https://deepmind.google/blog/rss.xml 10
+  # Dead: google-research.github.io (404), ai.meta.com/blog (404), anthropic.com (feed detect fail/404)
+
+  # ===== Existing Core Feeds =====
   - https://hnrss.org/frontpage 15
   - https://hnrss.org/best 10
-  - https://hnrss.org/posts 10
   - https://techcrunch.com/feed/ 20
   - https://feeds.arstechnica.com/arstechnica/index 15
   - https://www.theverge.com/rss/index.xml 10
-  - https://deepmind.google/blog/rss.xml 10
   - https://www.technologyreview.com/feed/ 10
-  - https://openai.com/blog/rss.xml 8
-  - https://www.anthropic.com/blog 10
-  - https://www.anthropic.com/research 8
-  - https://www.anthropic.com/rss.xml 8
-  - https://www.yannalecun.com/feed 5
-  - https://openai.com/company/rss.xml 8
-  - https://www.democracynow.org/feeds/democracy_now.xml 15
   - https://www.aljazeera.com/rss 10
+  # Dead: hnrss.org/posts (404), democracynow (404), yannlecun (DNS), openai/company (404)
+
+  # ===== Surveillance/Digital Rights =====
+  - https://www.eff.org/rss/updates.xml 8
+  - https://epic.org/feed/ 8
+
+  # ===== Disabled feeds (all returning errors) =====
+  # PNAS: 410 Gone
+  # PubMed: 404
+  # bioRxiv/medRxiv: 403/404
+  # The Lancet: DNS fail
+  # NEJM: 410
+  # NCBI PMC RSS: 404
+  # APS journals: 403
+  # INSPIRE-HEP: feed detect fail
+  # CERN breaking: 404
+  # IACR ePrint: 404
+  # CISA: 404
+  # USENIX: 404
+  # JOSS: 404
+  # GitHub trending/advisories: 404/detect fail
+  # Apache: 404
+  # NBER: 404
+  # SSRN: 403
+  # SIPRI: 404
+  # RAND: 403
+  # Brookings: detect fail
+  # CSIS: 404
+  # New America: 404
+  # Pew Research: 403
+  # RUSI: 404
+  # Understanding War: detect fail
+  # surveillanceandociety: DNS fail
+  # OSTI: 404
+
 google_news_keywords: "Large Language Models,Artificial Intelligence,Reinforcement Learning,Machine Learning,Neural Networks,Semantic Scholar,arXiv,Nature AI,OpenAlex,biotech,quantum computing,climate technology"
 instapaper: false
 weather_latitude: 0

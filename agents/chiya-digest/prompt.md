@@ -12,7 +12,7 @@ Generate today's curated digest message. Before curating, the **Librarian Agent*
    - Read `~/vault/CLAUDE.md` — understand the wiki structure
    - Read `~/vault/wiki/TASTE.md` — user preferences and relevance signals
    - Read `~/vault/index.md` — current wiki catalog
-   - Read `~/vault/log.md` — recent librarian activity
+   - Read `~/vault/log.md` — recent librarian activity (last 30 lines)
 
 2. **Check user context:**
    - Read all files in `~/vault/wiki/user/focuses/` — these are current high-priority interests
@@ -20,7 +20,9 @@ Generate today's curated digest message. Before curating, the **Librarian Agent*
    - Read `~/vault/wiki/user/interests.md` and `~/vault/wiki/user/profile.md` if they exist
 
 3. **Read today's raw articles:**
-   - Read `~/vault/raw/YYYY-MM-DD-articles.md`
+   - **First check** `~/vault/raw/inbox/YYYY-MM-DD-articles.md` (fresh, unprocessed collection)
+   - **Fallback** to `~/vault/raw/YYYY-MM-DD-articles.md` (already processed by librarian)
+   - If neither exists, use the most recent file in either directory
    - See what the librarian created/updated (from log.md)
 
 4. **Curate the digest:**
@@ -33,7 +35,7 @@ Generate today's curated digest message. Before curating, the **Librarian Agent*
 
 5. **Format the digest message:**
    ```
-   🍵 Chiya Daily Digest — YYYY-MM-DD
+   🍵 Chiya Daily Digest — YYYY-MM-DD (AM or PM)
 
    ## 🔭 Current Focus Hits
    Articles relevant to your active focuses and research
@@ -43,6 +45,9 @@ Generate today's curated digest message. Before curating, the **Librarian Agent*
    
    ## 🔄 Follow-ups
    Developments on topics already in the wiki
+   
+   ## 🏗️ Library Updates
+   Recently created or updated wiki pages — summarize key new insights
    
    ---
    Total articles collected: N | Curated highlights: M
@@ -59,3 +64,12 @@ Generate today's curated digest message. Before curating, the **Librarian Agent*
 - **Always contextualize** against wiki knowledge — this is what makes Chiya better than a raw RSS reader
 - **Flag research-relevant articles** prominently — link to the research project page
 - **Respect TASTE.md** — exclude or deprioritize what the user has marked
+
+### When to go silent
+
+Only reply with `[SILENT]` if **ALL** conditions are met:
+- No new articles in inbox or raw/
+- No wiki pages created/updated in last 24h
+- No librarian activity in log.md today
+
+Otherwise, always curate something — even if it's just 2-3 highlights. Recently created wiki pages are always worth mentioning.
