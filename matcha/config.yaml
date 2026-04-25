@@ -1,10 +1,6 @@
-markdown_dir_path: /home/velvet/chiya-library/matcha/output
+markdown_dir_path: /home/velvet/matcha/output
 feeds:
   # ===== Verified Working RSS Feeds =====
-  #
-  # NOTE: Most top sources (Semantic Scholar, OpenAlex, CrossRef, NCBI,
-  # Europe PMC, INSPIRE-HEP, Google Patents, Zenodo) are API-only — no RSS.
-  # Documented in /home/velvet/research-source-map.md for programmatic use.
 
   # ===== arXiv (2.4M papers, all STEM, daily) =====
   - http://export.arxiv.org/rss/cs.AI 20
@@ -38,12 +34,10 @@ feeds:
   - https://www.nature.com/neuro/current.rss 8
   - https://www.nature.com/nmeth/current.rss 8
   - https://www.nature.com/nrclinonc/current.rss 8
-  # Dead (404): natureelectronics, natenergy, s41591-0, ncommsmat
 
   # ===== Science =====
   - https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=science 15
   - https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=scirobotics 10
-  # Dead (404): scienceimmunology, scitranslmed, scienceadvances
 
   # ===== DOAJ (Open Access aggregator) =====
   - https://doaj.org/feed 10
@@ -52,23 +46,13 @@ feeds:
   - https://www.cell.com/action/showFeed?type=etoc&feed=rss&jc=cell 10
   - https://www.cell.com/action/showFeed?type=etoc&feed=rss&jc=immunity 8
   - https://www.cell.com/action/showFeed?type=etoc&feed=rss&jc=neuron 8
-  # Dead (404): critrev, molecule, trendsincognitive
-
-  # ===== IEEE Xplore =====
-  # Dead (404): ieee_Xplore_Computer_Science.xml, ieee_Xplore_Artificial_Intelligence.xml
-
-  # ===== ACM Digital Library =====
-  # Dead (DNS): feeds.acm.org
-
-  # ===== AI/ML Conference feeds =====
-  # Dead (404/expired): NeurIPS/ICLR/ICML 2024 schedules, alignmentforum, lesswrong
 
   # ===== AI/ML Lab blogs (working) =====
   - https://blog.research.google/feeds/posts/default?alt=rss 8
   - https://www.microsoft.com/en-us/research/feed/ 10
   - https://openai.com/blog/rss.xml 8
   - https://deepmind.google/blog/rss.xml 10
-  # Dead: google-research.github.io (404), ai.meta.com/blog (404), anthropic.com (feed detect fail/404)
+  - https://nousresearch.com/blog 8
 
   # ===== Existing Core Feeds =====
   - https://hnrss.org/frontpage 15
@@ -78,40 +62,10 @@ feeds:
   - https://www.theverge.com/rss/index.xml 10
   - https://www.technologyreview.com/feed/ 10
   - https://www.aljazeera.com/rss 10
-  # Dead: hnrss.org/posts (404), democracynow (404), yannlecun (DNS), openai/company (404)
 
   # ===== Surveillance/Digital Rights =====
   - https://www.eff.org/rss/updates.xml 8
   - https://epic.org/feed/ 8
-
-  # ===== Disabled feeds (all returning errors) =====
-  # PNAS: 410 Gone
-  # PubMed: 404
-  # bioRxiv/medRxiv: 403/404
-  # The Lancet: DNS fail
-  # NEJM: 410
-  # NCBI PMC RSS: 404
-  # APS journals: 403
-  # INSPIRE-HEP: feed detect fail
-  # CERN breaking: 404
-  # IACR ePrint: 404
-  # CISA: 404
-  # USENIX: 404
-  # JOSS: 404
-  # GitHub trending/advisories: 404/detect fail
-  # Apache: 404
-  # NBER: 404
-  # SSRN: 403
-  # SIPRI: 404
-  # RAND: 403
-  # Brookings: detect fail
-  # CSIS: 404
-  # New America: 404
-  # Pew Research: 403
-  # RUSI: 404
-  # Understanding War: detect fail
-  # surveillanceandociety: DNS fail
-  # OSTI: 404
 
 google_news_keywords: "Large Language Models,Artificial Intelligence,Reinforcement Learning,Machine Learning,Neural Networks,Semantic Scholar,arXiv,Nature AI,OpenAlex,biotech,quantum computing,climate technology"
 instapaper: false
@@ -126,8 +80,7 @@ sunrise_sunset: false
 openai_api_key:
 openai_base_url:
 openai_model:
-summary_feeds:
-  - https://hnrss.org/frontpage 10
+summary_feeds: []
 show_images: false
 analyst_feeds:
   - https://techcrunch.com/feed/
