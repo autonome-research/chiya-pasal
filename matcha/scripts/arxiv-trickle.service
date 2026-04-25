@@ -1,0 +1,16 @@
+[Unit]
+Description=arXiv Trickle Scraper for Chiya Library
+After=network-online.target
+
+[Service]
+Type=simple
+User=velvet
+Environment=VAULT_DIR=/home/velvet/vault
+ExecStart=/usr/bin/python3 /home/velvet/chiya-library/matcha/scripts/arxiv_trickle.py
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

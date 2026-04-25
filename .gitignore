@@ -2,6 +2,8 @@
 matcha/matcha.db
 matcha/logs/
 matcha/bin/matcha
+matcha/collect.lock
+matcha/*/arxiv_trickle.lock
 
 # Python
 __pycache__/
