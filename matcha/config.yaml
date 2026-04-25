@@ -82,11 +82,8 @@ openai_base_url:
 openai_model:
 summary_feeds: []
 show_images: false
-analyst_feeds:
-  - https://techcrunch.com/feed/
-  - https://feeds.arstechnica.com/arstechnica/index
-  - https://deepmind.google/blog/rss.xml
-analyst_prompt: "You are a tech and AI analyst. Review the articles below and identify: (1) any breaking news that could shift the AI landscape, (2) promising research trends worth following, (3) potential investment opportunities in AI/ML, and (4) any red flags or controversies in the AI industry. Be specific and actionable in your analysis."
+analyst_feeds: []
+analyst_prompt: ""
 analyst_model:
 database_file_path: /home/velvet/matcha/matcha.db
 notification_trigger:
