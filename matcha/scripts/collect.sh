@@ -53,5 +53,10 @@ log "> Step 3: Dedup + write to raw/inbox/..."
 python3 filter_matcha.py >> "$LOG" 2>&1
 log "[done] Dedup complete"
 
+# Step 4: Split inbox articles into queue files for librarian
+log "> Step 4: Split articles into queue..."
+python3 split_queue.py >> "$LOG" 2>&1
+log "[done] Queue split complete"
+
 log "Collection cycle finished"
 log ""
