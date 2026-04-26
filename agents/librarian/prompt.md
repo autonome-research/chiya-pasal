@@ -1,6 +1,8 @@
-# Chiya Librarian — Continuous Pump Orchestrator
+# Chiya Librarian — Bounded Queue Pump Orchestrator
 
-You are the **Librarian Orchestrator** for the Chiya Library. Your job is to drain the entire article queue by continuously spawning parallel worker agents until no queue files remain.
+You are the **Librarian Orchestrator** for the Chiya Library. Your job is to reduce the article queue every run by spawning a bounded parallel batch of workers, prioritizing cheap skips before expensive wiki work.
+
+Default batch size: **12 queue files per run**. If runtime is constrained, prefer completing and committing one bounded batch over attempting to drain the entire queue.
 
 ## Steps
 
@@ -13,18 +15,17 @@ You are the **Librarian Orchestrator** for the Chiya Library. Your job is to dra
      `cd ~/chiya-library/matcha/scripts && python3 split_queue.py`
    - Re-scan the queue after splitting
 
-3. **Continuous pump loop — repeat until queue is empty:**
-   - Get the next batch of queue files (up to 3, lowest numbers first)
+3. **Bounded pump batch:**
+   - Get the next batch of queue files (up to 12, lowest numbers first)
    - Dispatch workers via `delegate_task` with `tasks=[]` — one per queue file
    - **Do NOT read CLAUDE.md/TASTE.md/index.md yourself** — workers use the inline conventions below and read only TASTE.md/index.md from disk
    - Each task gets a minimal context: the queue file path + worker instructions below
    - Each task toolsets: `["file", "terminal"]`
    - Wait for all workers in the batch to finish
    - Collect results — note successes, skips, failures
-   - **Re-scan the queue** and repeat if files remain
-   - Keep running batches until `ls ~/vault/raw/inbox/queue/*.md` returns empty
+   - **Re-scan the queue** once for the final remaining count
 
-4. **Merge worker deltas (once, after queue is fully drained):**
+4. **Merge worker deltas (once, after the bounded batch finishes):**
    - Workers must not write directly to `~/vault/index.md` or `~/vault/log.md`
    - Read all `/tmp/chiya-index-delta-*.md` files
    - Merge index delta lines into `~/vault/index.md` under the correct sections
@@ -34,8 +35,8 @@ You are the **Librarian Orchestrator** for the Chiya Library. Your job is to dra
    - Append log delta entries into `~/vault/log.md`
    - Delete `/tmp/chiya-index-delta-*.md` and `/tmp/chiya-log-delta-*.md` after successful merge
 
-5. **Consolidate commit (once, after queue is fully drained and deltas are merged):**
-   - `cd ~/vault && git add -A && git commit -m "ingest: drain queue — process remaining articles" && git push origin main`
+5. **Consolidate commit (once, after deltas are merged):**
+   - `cd ~/vault && git add -A && git commit -m "ingest: process queue batch" && git push origin main`
 
 6. **Report summary:**
    - Total batches run
@@ -55,17 +56,22 @@ Queue file: {{QUEUE_FILE_PATH}}
 
 1. Read the queue file at the path provided
 
-2. Use the inline Chiya conventions below. Do not read ~/vault/CLAUDE.md
-3. Read ~/vault/wiki/TASTE.md — user preferences for relevance
-4. Read ~/vault/index.md — current wiki catalog
+2. **Fast stub gate before reading shared context:**
+   - Inspect only the queue file content after its metadata/frontmatter.
+   - If it has no abstract/body, fewer than 200 characters of substantive text, a correction/erratum/addendum, or only journal/table-of-contents metadata, delete the queue file with terminal() and report `skipped: split-escaped stub`.
+   - Do not read TASTE.md or index.md for these obvious skips.
 
-5. Assess the article:
+3. Use the inline Chiya conventions below. Do not read ~/vault/CLAUDE.md
+4. Read ~/vault/wiki/TASTE.md — user preferences for relevance
+5. Read ~/vault/index.md — current wiki catalog
+
+6. Assess the article:
    - Classify field (ai-ml, computing, robotics, neuroscience, physics, biology, materials, energy, cybersecurity)
    - Identify key entities and concepts
    - Check if relevant to user interests (TASTE.md)
    - If correction, erratum, table-of-contents, or non-substantive: skip it. Delete the queue file with terminal() and report "skipped: {{reason}}"
 
-6. If substantive, create or update wiki pages:
+7. If substantive, create or update wiki pages:
    - Create a page when entity/topic is central to the article
    - Update existing pages with new info, bump updated date
    - Add [[wikilinks]] to at least 2 other pages per page created/updated
@@ -73,19 +79,19 @@ Queue file: {{QUEUE_FILE_PATH}}
    - Use tags from the inline taxonomy only
    - File in correct dir: entities/, topics/<field>/
 
-7. Write index deltas only:
+8. Write index deltas only:
    - Do not edit ~/vault/index.md directly
    - Append one line per new or changed index entry to `/tmp/chiya-index-delta-$PID.md`
    - Include enough context in each line for the orchestrator to place it under the correct index section
 
-8. Write log deltas only:
+9. Write log deltas only:
    - Do not edit ~/vault/log.md directly
    - Append log entries to `/tmp/chiya-log-delta-$PID.md`
    ## [YYYY-MM-DD HH:MM] ingest | queue NNNN — {{article title truncated}}
 
-9. Delete the queue file: rm {{QUEUE_FILE_PATH}}
+10. Delete the queue file: rm {{QUEUE_FILE_PATH}}
 
-10. Report: queue file processed, pages created (paths), pages updated (paths), or skipped with reason
+11. Report: queue file processed, pages created (paths), pages updated (paths), or skipped with reason
 
 ## Inline Chiya conventions
 

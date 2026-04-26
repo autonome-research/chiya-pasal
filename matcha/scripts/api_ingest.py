@@ -11,6 +11,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MATCHA_DIR = os.path.dirname(SCRIPT_DIR)
 API_OUT = os.path.join(SCRIPT_DIR, "api-articles.jsonl")
 DIGEST_OUT = os.path.join(SCRIPT_DIR, "api-digest.md")
+API_MAX_RESULTS = int(os.environ.get("API_MAX_RESULTS", "6"))
+MIN_OUTPUT_ABSTRACT_CHARS = int(os.environ.get("MIN_OUTPUT_ABSTRACT_CHARS", "80"))
+MAX_OUTPUT_ABSTRACT_CHARS = int(os.environ.get("MAX_OUTPUT_ABSTRACT_CHARS", "1200"))
 
 CORE_QUERIES = [
     ("large language models transformer reinforcement learning", "AI/ML",
@@ -621,6 +624,16 @@ def dedup_articles(articles):
     return unique
 
 
+def output_abstract(article):
+    abstract = article.get("abstract", "") or article.get("abstract_short", "") or ""
+    abstract = re.sub(r"\s+", " ", str(abstract)).strip()
+    return abstract[:MAX_OUTPUT_ABSTRACT_CHARS]
+
+
+def has_usable_abstract(article):
+    return len(output_abstract(article)) >= MIN_OUTPUT_ABSTRACT_CHARS
+
+
 def main():
     start = time.time()
     print("=" * 50)
@@ -635,7 +648,7 @@ def main():
         for source_name in sources:
             t0 = time.time()
             try:
-                articles = fetch_api(source_name, query, max_results=12)
+                articles = fetch_api(source_name, query, max_results=API_MAX_RESULTS)
                 elapsed = time.time() - t0
                 print(f"  {source_name:20s} | {query[:30]:30s} -> {len(articles):3d} articles ({elapsed:5.1f}s)", flush=True)
                 for a in articles:
@@ -654,6 +667,7 @@ def main():
 
     filtered = dedup_articles(scored)
     filtered = [a for a in filtered if a["total_score"] >= 10]
+    filtered = [a for a in filtered if has_usable_abstract(a)]
 
     # Also merge RSS digest if available
     rss_path = os.path.join(MATCHA_DIR, "output", "filtered-digest.md")
@@ -675,6 +689,7 @@ def main():
         combined = scored + rss_articles
         filtered = dedup_articles(combined)
         filtered = [a for a in filtered if a["total_score"] >= 10]
+        filtered = [a for a in filtered if has_usable_abstract(a)]
 
     # Write JSONL output
     with open(API_OUT, "w") as f:
@@ -682,7 +697,7 @@ def main():
             entry = {
                 "title": a["title"],
                 "url": a.get("url", ""),
-                "abstract": a.get("abstract_short", "")[:500],
+                "abstract": output_abstract(a),
                 "date": str(a["date"]) if isinstance(a.get("date"), datetime) else str(a.get("date", "")),
                 "source": a["source"],
                 "domain": a["domain"],

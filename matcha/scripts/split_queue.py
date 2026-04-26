@@ -6,7 +6,8 @@ this script parses it and creates individual queue files in ~/vault/raw/inbox/qu
     001.md, 002.md, ...
 
 Each queue file contains one article with its title, source, URL, date, abstract, and batch info.
-Already-queued articles (by title dedup) are skipped so re-runs are idempotent.
+Already-seen articles (by title dedup) are skipped so re-runs are idempotent even
+after librarian workers delete queue files.
 
 Usage:
     python3 split_queue.py
@@ -19,6 +20,7 @@ import re
 import sys
 import html as html_lib
 import time
+import shutil
 import urllib.robotparser
 import urllib.request
 from urllib.error import HTTPError, URLError
@@ -30,13 +32,18 @@ from difflib import SequenceMatcher
 VAULT_DIR = os.environ.get("VAULT_DIR", os.path.expanduser("~/vault"))
 INBOX_DIR = os.path.join(VAULT_DIR, "raw", "inbox")
 QUEUE_DIR = os.path.join(INBOX_DIR, "queue")
+SKIP_DIR = os.path.join(QUEUE_DIR, "skip")
+ARCHIVE_DIR = os.path.join(INBOX_DIR, "archive")
+SEEN_TITLES_PATH = os.environ.get("SEEN_TITLES_PATH", os.path.expanduser("~/.seen-titles"))
+LEGACY_SEEN_TITLES_PATH = os.path.join(QUEUE_DIR, ".seen-titles")
 
 DUP_THRESHOLD = 0.85
 USER_AGENT = "Matcha/1.0 (research digest)"
 FETCH_TIMEOUT = 15
 FETCH_DELAY_SECONDS = 0.5
 FETCH_MIN_CHARS = 200
-FETCH_ABSTRACT_THRESHOLD = 50
+FETCH_ABSTRACT_THRESHOLD = 200
+MIN_QUEUE_TEXT_CHARS = 200
 MAX_FETCH_BYTES = 2_000_000
 
 try:
@@ -54,28 +61,94 @@ def log(msg):
 
 def get_next_queue_num() -> int:
     """Find the next available queue number."""
-    if not os.path.isdir(QUEUE_DIR):
-        return 1
-    existing = [int(f.stem) for f in Path(QUEUE_DIR).glob("*.md") if f.stem.isdigit()]
+    existing = []
+    for directory in (Path(QUEUE_DIR), Path(SKIP_DIR)):
+        if directory.is_dir():
+            existing.extend(int(f.stem) for f in directory.glob("*.md") if f.stem.isdigit())
     return max(existing, default=0) + 1
 
 
 def get_queued_titles() -> list:
-    """Load titles of already-queued articles for dedup."""
-    titles = []
-    if not os.path.isdir(QUEUE_DIR):
-        return titles
-    for f in Path(QUEUE_DIR).glob("*.md"):
-        text = f.read_text(encoding="utf-8", errors="replace")
-        m = re.search(r"^title:\s*(.+)$", text, re.MULTILINE)
-        if m:
-            titles.append(m.group(1).lower().strip())
-    return titles
+    """Load titles of already-queued or fetch-skipped articles for dedup."""
+    titles = set()
+    for seen_path in (Path(SEEN_TITLES_PATH), Path(LEGACY_SEEN_TITLES_PATH)):
+        if seen_path.is_file():
+            for line in seen_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                title = line.strip()
+                if title:
+                    titles.add(title)
+    for directory in (Path(QUEUE_DIR), Path(SKIP_DIR)):
+        if not directory.is_dir():
+            continue
+        for f in directory.glob("*.md"):
+            text = f.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r"^title:\s*(.+)$", text, re.MULTILINE)
+            if m:
+                titles.add(m.group(1).lower().strip())
+    return sorted(titles)
+
+
+def remember_titles(titles: list) -> None:
+    """Persist seen titles so processed/deleted queue files are not recreated."""
+    normalized = sorted({title.lower().strip() for title in titles if title and title.strip()})
+    Path(SEEN_TITLES_PATH).parent.mkdir(parents=True, exist_ok=True)
+    Path(SEEN_TITLES_PATH).write_text("\n".join(normalized) + ("\n" if normalized else ""), encoding="utf-8")
 
 
 def is_duplicate(title: str, existing: list) -> bool:
     title_lower = title.lower().strip()
     return any(SequenceMatcher(None, title_lower, t).ratio() > DUP_THRESHOLD for t in existing)
+
+
+def mark_seen(title: str, queued_titles: list) -> None:
+    normalized = title.lower().strip()
+    if normalized:
+        queued_titles.append(normalized)
+        remember_titles(queued_titles)
+
+
+def substantive_text(article: dict) -> str:
+    return normalize_text("\n\n".join(
+        part for part in (
+            article.get("abstract", ""),
+            article.get("content", ""),
+        )
+        if part
+    ))
+
+
+def should_skip_without_queue(article: dict) -> tuple[bool, str]:
+    """Return whether an article is too thin to spend librarian cycles on."""
+    text_len = len(substantive_text(article))
+    title = article.get("title", "")
+    source = article.get("source", "")
+    batch = article.get("batch", "")
+
+    if re.search(r"\b(author correction|correction:|erratum|addendum)\b", title, re.I):
+        return True, "correction/erratum/addendum"
+    if source.upper() == "DOAJ" or re.search(r"\bDOAJ\b|ISSN|\(\d{4}-\d{3}[\dXx]", f"{title} {batch}"):
+        return True, "journal/table-of-contents metadata"
+    if text_len < MIN_QUEUE_TEXT_CHARS:
+        return True, f"insufficient article text ({text_len} chars)"
+    return False, ""
+
+
+def record_skip(num: int, article: dict, reason: str) -> str:
+    article = {**article, "abstract": article.get("abstract", "").strip()}
+    article["skip_reason"] = reason
+    article["content"] = f"Skipped at split time: {reason}"
+    return write_queue_file(num, article, directory=SKIP_DIR)
+
+
+def archive_inbox_file(inbox_file: Path) -> Path:
+    """Move a split inbox file out of the active inbox so it is not reprocessed."""
+    Path(ARCHIVE_DIR).mkdir(parents=True, exist_ok=True)
+    destination = Path(ARCHIVE_DIR) / inbox_file.name
+    if destination.exists():
+        stamp = datetime.now().strftime("%H%M%S")
+        destination = Path(ARCHIVE_DIR) / f"{inbox_file.stem}-{stamp}{inbox_file.suffix}"
+    shutil.move(str(inbox_file), str(destination))
+    return destination
 
 
 def normalize_text(text: str) -> str:
@@ -244,6 +317,8 @@ def write_queue_file(num: int, article: dict, directory: str = QUEUE_DIR) -> str
         content += f"**Date:** {article['date']}\n"
     if article.get('abstract'):
         content += f"\n{article['abstract']}\n"
+    if article.get('skip_reason'):
+        content += f"\n**Skipped at split time:** {article['skip_reason']}\n"
     if article.get('content') and len(article.get('content', '')) >= FETCH_MIN_CHARS:
         content += f"\n{article['content']}\n"
     content += f"\n---\n*Collected: {article.get('batch', 'unknown')}*\n"
@@ -306,10 +381,10 @@ def parse_collect_block(lines: list, section_header: str) -> list:
         stripped = line.strip()
         # Match: - [Title](url) *(Source)* — abstract
         # Use [^\]]+ and [^)]+ for robust matching (handles HTML tags in titles)
-        m = re.match(r'^- \[([^\]]+)\]\(([^)]+)\)\s*\*\(([^)]*)\)\*\s*(.*)?$', stripped)
+        m = re.match(r'^- \[([^\]]+)\]\(([^)]*)\)\s*\*\(([^)]*)\)\*\s*(.*)?$', stripped)
         if not m:
             # Try without source tag: - [Title](url)
-            m = re.match(r'^- \[([^\]]+)\]\(([^)]+)\)\s*(.*)?$', stripped)
+            m = re.match(r'^- \[([^\]]+)\]\(([^)]*)\)\s*(.*)?$', stripped)
             if not m:
                 continue
             title = m.group(1).strip()
@@ -395,8 +470,11 @@ def main():
     log(f"split_queue.py — scanning inbox in {INBOX_DIR}")
 
     os.makedirs(QUEUE_DIR, exist_ok=True)
+    os.makedirs(SKIP_DIR, exist_ok=True)
+    os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
     queued_titles = get_queued_titles()
+    remember_titles(queued_titles)
     log(f"Already queued: {len(queued_titles)} articles")
 
     inbox_files = sorted(Path(INBOX_DIR).glob("*-articles.md"))
@@ -406,6 +484,7 @@ def main():
 
     total_new = 0
     total_skipped = 0
+    total_archived = 0
     next_num = get_next_queue_num()
 
     for inbox_file in inbox_files:
@@ -423,13 +502,26 @@ def main():
                 if len(fetched) >= FETCH_MIN_CHARS:
                     article["content"] = fetched
 
+            should_skip, reason = should_skip_without_queue(article)
+            if should_skip:
+                path = record_skip(next_num, article, reason)
+                log(f"Skipped {reason}: {article['title']} -> {path}")
+                mark_seen(article["title"], queued_titles)
+                next_num += 1
+                total_skipped += 1
+                continue
+
             path = write_queue_file(next_num, article)
             log(f"Queued {article['title']} -> {path}")
-            queued_titles.append(article["title"].lower().strip())
+            mark_seen(article["title"], queued_titles)
             next_num += 1
             total_new += 1
 
-    log(f"Done: {total_new} new queue files, {total_skipped} skipped (dups/already queued/fetch failures)")
+        archived = archive_inbox_file(inbox_file)
+        total_archived += 1
+        log(f"Archived split inbox file -> {archived}")
+
+    log(f"Done: {total_new} new queue files, {total_skipped} skipped (dups/already seen/thin), {total_archived} inbox files archived")
     return 0
 
 

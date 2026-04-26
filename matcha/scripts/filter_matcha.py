@@ -14,6 +14,7 @@ import json
 from datetime import datetime
 from collections import defaultdict
 from difflib import SequenceMatcher
+from urllib.parse import urlsplit, urlunsplit
 
 # Configuration
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +29,46 @@ API_ARTICLES_PATH = os.path.join(SCRIPT_DIR, "api-articles.jsonl")
 # Output — vault raw/inbox/ (ingest drop zone)
 RAW_INBOX_DIR = os.path.join(VAULT_DIR, "raw", "inbox")
 RAW_ARTICLES_PATH = os.path.join(RAW_INBOX_DIR, f"{TODAY}-articles.md")
+RAW_ARCHIVE_DIR = os.path.join(RAW_INBOX_DIR, "archive")
+DUP_THRESHOLD = 0.85
+MIN_API_ABSTRACT_CHARS = int(os.environ.get("MIN_API_ABSTRACT_CHARS", "80"))
+MAX_ABSTRACT_CHARS = int(os.environ.get("MAX_ARTICLE_ABSTRACT_CHARS", "1200"))
+DISABLED_SECTIONS = {
+    "DOAJ (Open Access aggregator)",
+    "Al Jazeera",
+}
+LOW_VALUE_RSS_SECTIONS = {
+    "Hacker News Front Page",
+    "Hacker News Best",
+    "The Verge",
+}
+
+
+def normalize_title(title):
+    """Normalize titles for fuzzy duplicate checks."""
+    title = re.sub(r'<[^>]+>', '', title or '')
+    title = re.sub(r'\s+', ' ', title).strip().lower()
+    title = re.sub(r'^[^\w]+|[^\w]+$', '', title)
+    return title
+
+
+def normalize_url(url):
+    """Normalize URLs enough to catch repeated feed/API entries."""
+    if not url:
+        return ''
+    url = str(url)
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return url.strip()
+    netloc = parts.netloc.lower()
+    path = parts.path.rstrip('/')
+    return urlunsplit((parts.scheme.lower(), netloc, path, '', ''))
+
+
+def article_quality(article):
+    """Prefer duplicates that carry usable abstract text."""
+    return len((article.get('abstract') or '').strip())
 
 
 def load_api_articles(api_path):
@@ -88,39 +129,108 @@ def parse_rss_articles(rss_path):
 
 
 def deduplicate(articles):
-    """Deduplicate articles by title similarity (>0.85 = duplicate)."""
+    """Deduplicate articles by normalized URL and title similarity."""
     unique = []
     for article in articles:
-        title_lower = article['title'].lower().strip()
-        is_dup = False
-        for existing in unique:
-            existing_title = existing['title'].lower().strip()
-            if SequenceMatcher(None, title_lower, existing_title).ratio() > 0.85:
-                is_dup = True
+        title_norm = normalize_title(article.get('title', ''))
+        url_norm = normalize_url(article.get('url', ''))
+        if not title_norm:
+            continue
+        dup_index = None
+        for i, existing in enumerate(unique):
+            existing_title = normalize_title(existing.get('title', ''))
+            existing_url = normalize_url(existing.get('url', ''))
+            same_url = url_norm and existing_url and url_norm == existing_url
+            same_title = SequenceMatcher(None, title_norm, existing_title).ratio() > DUP_THRESHOLD
+            if same_url or same_title:
+                dup_index = i
                 break
-        if not is_dup:
+        if dup_index is None:
             unique.append(article)
+        elif article_quality(article) > article_quality(unique[dup_index]):
+            unique[dup_index] = article
     return unique
 
 
-def get_existing_titles(path):
-    """Read existing titles from the daily raw articles file (to avoid re-adding)."""
-    titles = set()
-    if not os.path.exists(path):
-        return titles
-    with open(path) as f:
-        for line in f:
-            match = re.search(r'\[([^\]]+)\]\(([^)]+)\)', line)
-            if match:
-                titles.add(match.group(1).lower().strip())
-    return titles
+def existing_article_paths(path):
+    """Return active and archived daily article files for today's dedup."""
+    paths = []
+    if os.path.exists(path):
+        paths.append(path)
+    if os.path.isdir(RAW_ARCHIVE_DIR):
+        archive_prefix = os.path.basename(path).removesuffix(".md")
+        for name in sorted(os.listdir(RAW_ARCHIVE_DIR)):
+            if name.startswith(archive_prefix) and name.endswith(".md"):
+                paths.append(os.path.join(RAW_ARCHIVE_DIR, name))
+    return paths
+
+
+def get_existing_articles(paths):
+    """Read existing title and URL keys from active/archived daily raw article files."""
+    titles = []
+    urls = set()
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        with open(path) as f:
+            for line in f:
+                match = re.search(r'\[([^\]]+)\]\(([^)]*)\)', line)
+                if match:
+                    titles.append(normalize_title(match.group(1)))
+                    urls.add(normalize_url(match.group(2)))
+    return titles, urls
+
+
+def already_seen(article, existing_titles, existing_urls):
+    """Return True when an article is already present in today's file."""
+    title_norm = normalize_title(article.get('title', ''))
+    url_norm = normalize_url(article.get('url', ''))
+    if url_norm and url_norm in existing_urls:
+        return True
+    return any(SequenceMatcher(None, title_norm, title).ratio() > DUP_THRESHOLD for title in existing_titles)
+
+
+def candidate_reason(article):
+    """Return None for keep, otherwise the reason this article should be dropped."""
+    title = article.get('title', '')
+    section = article.get('section', article.get('domain', article.get('source', '')))
+    source = article.get('source', '')
+    abstract = (article.get('abstract') or '').strip()
+
+    if not title or title in ['💬', '🔥', '_']:
+        return "missing title"
+    if not article.get('url'):
+        return "missing URL"
+    if section in DISABLED_SECTIONS or source == "DOAJ":
+        return "disabled low-signal source"
+    if section in LOW_VALUE_RSS_SECTIONS:
+        return "low-value broad RSS section"
+    if re.search(r'\b(author correction|correction:|erratum|addendum)\b', title, re.I):
+        return "correction/erratum/addendum"
+    if source != "RSS" and len(abstract) < MIN_API_ABSTRACT_CHARS:
+        return f"API article has short/no abstract ({len(abstract)} chars)"
+    return None
+
+
+def filter_candidates(articles):
+    """Remove entries that consistently become queue stubs or librarian skips."""
+    kept = []
+    dropped = defaultdict(int)
+    for article in articles:
+        reason = candidate_reason(article)
+        if reason is None:
+            kept.append(article)
+        else:
+            dropped[reason] += 1
+    return kept, dropped
 
 
 def format_article_line(art):
     """Format a single article as a markdown line."""
     source_tag = f" *({art.get('source', 'RSS')})*"
     abstract = art.get('abstract', '') or ''
-    abstract_preview = ' — ' + abstract[:150] + '...' if len(abstract) > 150 else f" — {abstract}" if abstract else ''
+    abstract = re.sub(r'\s+', ' ', abstract).strip()
+    abstract_preview = f" — {abstract[:MAX_ABSTRACT_CHARS]}" if abstract else ''
     return f"- [{art['title']}]({art['url']}){source_tag}{abstract_preview}"
 
 
@@ -141,19 +251,27 @@ def main():
     all_articles = rss_articles + api_articles
     print(f"  → {len(all_articles)} total before dedup")
 
+    all_articles, dropped = filter_candidates(all_articles)
+    print(f"  → {len(all_articles)} after quality/source filters")
+    for reason, count in sorted(dropped.items()):
+        print(f"    - dropped {count}: {reason}")
+
     # Deduplicate within this batch
     batch_unique = deduplicate(all_articles)
     print(f"  → {len(batch_unique)} after dedup")
 
     # Check what's already in the daily file
-    existing_titles = get_existing_titles(RAW_ARTICLES_PATH)
+    existing_paths = existing_article_paths(RAW_ARTICLES_PATH)
+    existing_titles, existing_urls = get_existing_articles(existing_paths)
+    if existing_paths:
+        print(f"  → checked {len(existing_paths)} active/archived daily files for existing articles")
     new_articles = []
     for art in batch_unique:
-        if art['title'].lower().strip() not in existing_titles:
+        if not already_seen(art, existing_titles, existing_urls):
             new_articles.append(art)
 
-    already_seen = len(batch_unique) - len(new_articles)
-    print(f"  → {len(new_articles)} new articles ({already_seen} already in today's file)")
+    already_seen_count = len(batch_unique) - len(new_articles)
+    print(f"  → {len(new_articles)} new articles ({already_seen_count} already in today's file)")
 
     if not new_articles:
         print("\n✅ Nothing new to add.")

@@ -9,6 +9,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MATCHA_DIR="$(dirname "$SCRIPT_DIR")"
 VAULT_DIR="${VAULT_DIR:-$HOME/vault}"
+export VAULT_DIR
 LOG_DIR="${MATCHA_DIR}/logs"
 LOCK_FILE="${MATCHA_DIR}/collect.lock"
 TODAY=$(date +%Y-%m-%d)
@@ -27,9 +28,40 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"
 }
 
+queue_health() {
+    local queue_dir="$VAULT_DIR/raw/inbox/queue"
+    local seen_file="${SEEN_TITLES_PATH:-$HOME/.seen-titles}"
+    local stats
+    if [ ! -d "$queue_dir" ]; then
+        log "[queue] queue_dir=$queue_dir missing"
+        return
+    fi
+    stats=$(find "$queue_dir" -maxdepth 1 -type f -name '*.md' -printf '%s\n' | awk '
+        {n++; bytes += $1; if ($1 < 300) lt300++; if ($1 < 500) lt500++; if ($1 < 1000) lt1000++}
+        END {printf "files=%d bytes=%d lt300=%d lt500=%d lt1000=%d", n+0, bytes+0, lt300+0, lt500+0, lt1000+0}
+    ')
+    local skip_count=0
+    local seen_count=0
+    if [ -d "$queue_dir/skip" ]; then
+        skip_count=$(find "$queue_dir/skip" -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' ')
+    fi
+    if [ -f "$seen_file" ]; then
+        seen_count=$(wc -l < "$seen_file" | tr -d ' ')
+    fi
+    log "[queue] $stats skip=$skip_count seen_titles=$seen_count"
+}
+
+on_error() {
+    local exit_code=$?
+    log "[error] Collection cycle failed at line $1 (exit $exit_code)"
+    exit "$exit_code"
+}
+trap 'on_error $LINENO' ERR
+
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log "Matcha Collection — $TODAY (vault: $VAULT_DIR)"
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+queue_health
 
 # Step 1: API ingestion
 log "> Step 1: API ingestion (api_ingest.py)..."
@@ -57,6 +89,7 @@ log "[done] Dedup complete"
 log "> Step 4: Split articles into queue..."
 python3 split_queue.py >> "$LOG" 2>&1
 log "[done] Queue split complete"
+queue_health
 
 log "Collection cycle finished"
 log ""

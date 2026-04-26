@@ -40,7 +40,8 @@ feeds:
   - https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=scirobotics 10
 
   # ===== DOAJ (Open Access aggregator) =====
-  - https://doaj.org/feed 10
+  # Disabled: this feed emits journal/table-of-contents metadata that becomes title-only queue stubs.
+  # - https://doaj.org/feed 10
 
   # ===== Cell Press =====
   - https://www.cell.com/action/showFeed?type=etoc&feed=rss&jc=cell 10
@@ -55,13 +56,14 @@ feeds:
   - https://nousresearch.com/blog 8
 
   # ===== Existing Core Feeds =====
-  - https://hnrss.org/frontpage 15
-  - https://hnrss.org/best 10
-  - https://techcrunch.com/feed/ 20
-  - https://feeds.arstechnica.com/arstechnica/index 15
-  - https://www.theverge.com/rss/index.xml 10
+  # Broad consumer/news feeds are intentionally capped or disabled; most backlog skips came from them.
+  # - https://hnrss.org/frontpage 15
+  # - https://hnrss.org/best 10
+  - https://techcrunch.com/feed/ 5
+  - https://feeds.arstechnica.com/arstechnica/index 8
+  # - https://www.theverge.com/rss/index.xml 10
   - https://www.technologyreview.com/feed/ 10
-  - https://www.aljazeera.com/rss 10
+  # - https://www.aljazeera.com/rss 10
 
   # ===== Surveillance/Digital Rights =====
   - https://www.eff.org/rss/updates.xml 8
