@@ -30,7 +30,6 @@ from difflib import SequenceMatcher
 VAULT_DIR = os.environ.get("VAULT_DIR", os.path.expanduser("~/vault"))
 INBOX_DIR = os.path.join(VAULT_DIR, "raw", "inbox")
 QUEUE_DIR = os.path.join(INBOX_DIR, "queue")
-SKIP_DIR = os.path.join(QUEUE_DIR, "skip")
 
 DUP_THRESHOLD = 0.85
 USER_AGENT = "Matcha/1.0 (research digest)"
@@ -58,8 +57,6 @@ def get_next_queue_num() -> int:
     if not os.path.isdir(QUEUE_DIR):
         return 1
     existing = [int(f.stem) for f in Path(QUEUE_DIR).glob("*.md") if f.stem.isdigit()]
-    if os.path.isdir(SKIP_DIR):
-        existing.extend(int(f.stem) for f in Path(SKIP_DIR).glob("*.md") if f.stem.isdigit())
     return max(existing, default=0) + 1
 
 
@@ -68,10 +65,7 @@ def get_queued_titles() -> list:
     titles = []
     if not os.path.isdir(QUEUE_DIR):
         return titles
-    queue_files = list(Path(QUEUE_DIR).glob("*.md"))
-    if os.path.isdir(SKIP_DIR):
-        queue_files.extend(Path(SKIP_DIR).glob("*.md"))
-    for f in queue_files:
+    for f in Path(QUEUE_DIR).glob("*.md"):
         text = f.read_text(encoding="utf-8", errors="replace")
         m = re.search(r"^title:\s*(.+)$", text, re.MULTILINE)
         if m:
@@ -157,7 +151,11 @@ def extract_with_bs4(html: str) -> str:
         candidates.extend(soup.select(selector))
 
     if not candidates:
-        candidates = [soup.body or soup]
+        # Fallback: use body but strip nav, footer, header, aside, form
+        body = soup.body or soup
+        for tag in body(["nav", "footer", "header", "aside", "form", "iframe"]):
+            tag.decompose()
+        candidates = [body]
 
     best = max(
         (normalize_text(candidate.get_text("\n", strip=True)) for candidate in candidates),
@@ -246,18 +244,11 @@ def write_queue_file(num: int, article: dict, directory: str = QUEUE_DIR) -> str
         content += f"**Date:** {article['date']}\n"
     if article.get('abstract'):
         content += f"\n{article['abstract']}\n"
-    if article.get('content'):
+    if article.get('content') and len(article.get('content', '')) >= FETCH_MIN_CHARS:
         content += f"\n{article['content']}\n"
     content += f"\n---\n*Collected: {article.get('batch', 'unknown')}*\n"
     Path(path).write_text(content, encoding="utf-8")
     return path
-
-
-def move_to_skip(path: str) -> str:
-    os.makedirs(SKIP_DIR, exist_ok=True)
-    dest = os.path.join(SKIP_DIR, os.path.basename(path))
-    os.replace(path, dest)
-    return dest
 
 
 def parse_trickle_block(lines: list, section_header: str) -> list:
@@ -429,16 +420,8 @@ def main():
             abstract = article.get("abstract", "").strip()
             if len(abstract) < FETCH_ABSTRACT_THRESHOLD:
                 fetched = fetch_content(article.get("url", ""))
-                if len(fetched) < FETCH_MIN_CHARS:
+                if len(fetched) >= FETCH_MIN_CHARS:
                     article["content"] = fetched
-                    path = write_queue_file(next_num, article)
-                    skipped_path = move_to_skip(path)
-                    log(f"Skipped {article['title']}: fetched content under {FETCH_MIN_CHARS} chars -> {skipped_path}")
-                    queued_titles.append(article["title"].lower().strip())
-                    next_num += 1
-                    total_skipped += 1
-                    continue
-                article["content"] = fetched
 
             path = write_queue_file(next_num, article)
             log(f"Queued {article['title']} -> {path}")

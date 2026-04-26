@@ -24,3 +24,6 @@ token*
 # OS
 .DS_Store
 Thumbs.db
+
+# Codex
+.codex
