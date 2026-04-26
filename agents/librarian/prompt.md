@@ -20,7 +20,7 @@ Default batch size: **12 queue files per run**. If runtime is constrained, prefe
    - Dispatch workers via `delegate_task` with `tasks=[]` — one per queue file
    - **Do NOT read CLAUDE.md/TASTE.md/index.md yourself** — workers use the inline conventions below and read only TASTE.md/index.md from disk
    - Each task gets a minimal context: the queue file path + worker instructions below
-   - Each task toolsets: `["file", "terminal"]`
+   - Each task toolsets: `["file", "terminal", "web"]` — web access is for fetching article content when abstract is thin
    - Wait for all workers in the batch to finish
    - Collect results — note successes, skips, failures
    - **Re-scan the queue** once for the final remaining count
@@ -58,20 +58,24 @@ Queue file: {{QUEUE_FILE_PATH}}
 
 2. **Fast stub gate before reading shared context:**
    - Inspect only the queue file content after its metadata/frontmatter.
-   - If it has no abstract/body, fewer than 200 characters of substantive text, a correction/erratum/addendum, or only journal/table-of-contents metadata, delete the queue file with terminal() and report `skipped: split-escaped stub`.
+   - If it has a correction/erratum/addendum in the title, is DOAJ/journal table-of-contents, or has no URL at all, delete the queue file with terminal() and report `skipped: {{reason}}`.
    - Do not read TASTE.md or index.md for these obvious skips.
 
-3. Use the inline Chiya conventions below. Do not read ~/vault/CLAUDE.md
-4. Read ~/vault/wiki/TASTE.md — user preferences for relevance
-5. Read ~/vault/index.md — current wiki catalog
+3. **Fetch article content if abstract is thin:**
+   - If the queue file has fewer than 200 characters of abstract/body text, use web_search or fetch the URL to get more context about the article.
+   - If you cannot retrieve additional content and the abstract is insufficient to assess, skip it and report `skipped: insufficient content`.
 
-6. Assess the article:
+4. Use the inline Chiya conventions below. Do not read ~/vault/CLAUDE.md
+5. Read ~/vault/wiki/TASTE.md — user preferences for relevance
+6. Read ~/vault/index.md — current wiki catalog
+
+7. Assess the article:
    - Classify field (ai-ml, computing, robotics, neuroscience, physics, biology, materials, energy, cybersecurity)
    - Identify key entities and concepts
    - Check if relevant to user interests (TASTE.md)
    - If correction, erratum, table-of-contents, or non-substantive: skip it. Delete the queue file with terminal() and report "skipped: {{reason}}"
 
-7. If substantive, create or update wiki pages:
+8. If substantive, create or update wiki pages:
    - Create a page when entity/topic is central to the article
    - Update existing pages with new info, bump updated date
    - Add [[wikilinks]] to at least 2 other pages per page created/updated
@@ -79,19 +83,19 @@ Queue file: {{QUEUE_FILE_PATH}}
    - Use tags from the inline taxonomy only
    - File in correct dir: entities/, topics/<field>/
 
-8. Write index deltas only:
+9. Write index deltas only:
    - Do not edit ~/vault/index.md directly
    - Append one line per new or changed index entry to `/tmp/chiya-index-delta-$PID.md`
    - Include enough context in each line for the orchestrator to place it under the correct index section
 
-9. Write log deltas only:
+10. Write log deltas only:
    - Do not edit ~/vault/log.md directly
    - Append log entries to `/tmp/chiya-log-delta-$PID.md`
    ## [YYYY-MM-DD HH:MM] ingest | queue NNNN — {{article title truncated}}
 
-10. Delete the queue file: rm {{QUEUE_FILE_PATH}}
+11. Delete the queue file: rm {{QUEUE_FILE_PATH}}
 
-11. Report: queue file processed, pages created (paths), pages updated (paths), or skipped with reason
+12. Report: queue file processed, pages created (paths), pages updated (paths), or skipped with reason
 
 ## Inline Chiya conventions
 

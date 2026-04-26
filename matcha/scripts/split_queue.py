@@ -2,10 +2,11 @@
 """split_queue.py — Split inbox articles into individual queue files for the librarian.
 
 After collect.sh or arxiv_trickle.py appends to ~/vault/raw/inbox/YYYY-MM-DD-articles.md,
-this script parses it and creates individual queue files in ~/vault/raw/inbox/queue/:
+this script parses it and creates lightweight queue files in ~/vault/raw/inbox/queue/:
     001.md, 002.md, ...
 
-Each queue file contains one article with its title, source, URL, date, abstract, and batch info.
+Each queue file contains only: title, source, URL, date, abstract, and batch info.
+No full-article fetching — the librarian decides what to read and summarize.
 Already-seen articles (by title dedup) are skipped so re-runs are idempotent even
 after librarian workers delete queue files.
 
@@ -18,13 +19,7 @@ Environment:
 import os
 import re
 import sys
-import html as html_lib
-import time
 import shutil
-import urllib.robotparser
-import urllib.request
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse, urlunparse
 from pathlib import Path
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -38,21 +33,6 @@ SEEN_TITLES_PATH = os.environ.get("SEEN_TITLES_PATH", os.path.expanduser("~/.see
 LEGACY_SEEN_TITLES_PATH = os.path.join(QUEUE_DIR, ".seen-titles")
 
 DUP_THRESHOLD = 0.85
-USER_AGENT = "Matcha/1.0 (research digest)"
-FETCH_TIMEOUT = 15
-FETCH_DELAY_SECONDS = 0.5
-FETCH_MIN_CHARS = 200
-FETCH_ABSTRACT_THRESHOLD = 200
-MIN_QUEUE_TEXT_CHARS = 200
-MAX_FETCH_BYTES = 2_000_000
-
-try:
-    from bs4 import BeautifulSoup
-except ImportError:
-    BeautifulSoup = None
-
-_robots_cache = {}
-_last_fetch_at = 0.0
 
 
 def log(msg):
@@ -69,7 +49,7 @@ def get_next_queue_num() -> int:
 
 
 def get_queued_titles() -> list:
-    """Load titles of already-queued or fetch-skipped articles for dedup."""
+    """Load titles of already-queued or skip articles for dedup."""
     titles = set()
     for seen_path in (Path(SEEN_TITLES_PATH), Path(LEGACY_SEEN_TITLES_PATH)):
         if seen_path.is_file():
@@ -107,19 +87,8 @@ def mark_seen(title: str, queued_titles: list) -> None:
         remember_titles(queued_titles)
 
 
-def substantive_text(article: dict) -> str:
-    return normalize_text("\n\n".join(
-        part for part in (
-            article.get("abstract", ""),
-            article.get("content", ""),
-        )
-        if part
-    ))
-
-
 def should_skip_without_queue(article: dict) -> tuple[bool, str]:
-    """Return whether an article is too thin to spend librarian cycles on."""
-    text_len = len(substantive_text(article))
+    """Return whether an article should be skipped at split time (no body fetch)."""
     title = article.get("title", "")
     source = article.get("source", "")
     batch = article.get("batch", "")
@@ -128,15 +97,13 @@ def should_skip_without_queue(article: dict) -> tuple[bool, str]:
         return True, "correction/erratum/addendum"
     if source.upper() == "DOAJ" or re.search(r"\bDOAJ\b|ISSN|\(\d{4}-\d{3}[\dXx]", f"{title} {batch}"):
         return True, "journal/table-of-contents metadata"
-    if text_len < MIN_QUEUE_TEXT_CHARS:
-        return True, f"insufficient article text ({text_len} chars)"
+    # Don't skip for short abstracts — librarian decides what to fetch and read
     return False, ""
 
 
 def record_skip(num: int, article: dict, reason: str) -> str:
     article = {**article, "abstract": article.get("abstract", "").strip()}
     article["skip_reason"] = reason
-    article["content"] = f"Skipped at split time: {reason}"
     return write_queue_file(num, article, directory=SKIP_DIR)
 
 
@@ -149,156 +116,6 @@ def archive_inbox_file(inbox_file: Path) -> Path:
         destination = Path(ARCHIVE_DIR) / f"{inbox_file.stem}-{stamp}{inbox_file.suffix}"
     shutil.move(str(inbox_file), str(destination))
     return destination
-
-
-def normalize_text(text: str) -> str:
-    """Collapse extracted HTML text into readable paragraphs."""
-    text = re.sub(r"\r\n?", "\n", text or "")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
-    return text.strip()
-
-
-def robots_allowed(url: str) -> bool:
-    """Return whether robots.txt allows this user agent to fetch the URL."""
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        return False
-
-    robots_url = urlunparse((parsed.scheme, parsed.netloc, "/robots.txt", "", "", ""))
-    if robots_url not in _robots_cache:
-        parser = urllib.robotparser.RobotFileParser()
-        parser.set_url(robots_url)
-        request = urllib.request.Request(robots_url, headers={"User-Agent": USER_AGENT})
-        try:
-            with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT) as response:
-                robots_txt = response.read(MAX_FETCH_BYTES).decode("utf-8", errors="replace")
-            parser.parse(robots_txt.splitlines())
-            _robots_cache[robots_url] = parser
-        except HTTPError as exc:
-            if exc.code in (401, 403):
-                log(f"robots.txt forbids access for {parsed.netloc}: HTTP {exc.code}")
-                _robots_cache[robots_url] = False
-            else:
-                log(f"robots.txt unavailable for {parsed.netloc}: HTTP {exc.code}")
-                _robots_cache[robots_url] = None
-        except Exception as exc:
-            log(f"robots.txt unavailable for {parsed.netloc}: {exc}")
-            _robots_cache[robots_url] = None
-
-    parser = _robots_cache[robots_url]
-    if parser is False:
-        return False
-    return True if parser is None else parser.can_fetch(USER_AGENT, url)
-
-
-def rate_limit_fetch() -> None:
-    """Sleep as needed so article fetches are spaced out."""
-    global _last_fetch_at
-    elapsed = time.monotonic() - _last_fetch_at
-    if _last_fetch_at and elapsed < FETCH_DELAY_SECONDS:
-        time.sleep(FETCH_DELAY_SECONDS - elapsed)
-    _last_fetch_at = time.monotonic()
-
-
-def extract_with_bs4(html: str) -> str:
-    soup = BeautifulSoup(html, "html.parser")
-    for tag in soup(["script", "style", "noscript"]):
-        tag.decompose()
-
-    selectors = [
-        "article",
-        '[role="article"]',
-        ".article-body",
-        ".article__body",
-        ".article-content",
-        ".entry-content",
-        ".post-content",
-        ".story-body",
-        ".body-content",
-        ".content-body",
-        "main",
-    ]
-    candidates = []
-    for selector in selectors:
-        candidates.extend(soup.select(selector))
-
-    if not candidates:
-        # Fallback: use body but strip nav, footer, header, aside, form
-        body = soup.body or soup
-        for tag in body(["nav", "footer", "header", "aside", "form", "iframe"]):
-            tag.decompose()
-        candidates = [body]
-
-    best = max(
-        (normalize_text(candidate.get_text("\n", strip=True)) for candidate in candidates),
-        key=len,
-        default="",
-    )
-    return best
-
-
-def extract_with_regex(html: str) -> str:
-    html = re.sub(r"(?is)<(script|style|noscript).*?>.*?</\1>", " ", html)
-    patterns = [
-        r"(?is)<article\b[^>]*>(.*?)</article>",
-        r'(?is)<div\b[^>]*(?:class|id)=["\'][^"\']*(?:article-body|article__body|article-content|entry-content|post-content|story-body|body-content|content-body)[^"\']*["\'][^>]*>(.*?)</div>',
-        r"(?is)<main\b[^>]*>(.*?)</main>",
-    ]
-    candidates = []
-    for pattern in patterns:
-        candidates.extend(match.group(1) for match in re.finditer(pattern, html))
-
-    if not candidates:
-        candidates = [html]
-
-    text_candidates = []
-    for candidate in candidates:
-        text = re.sub(r"(?i)<br\s*/?>", "\n", candidate)
-        text = re.sub(r"(?i)</p\s*>", "\n\n", text)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = html_lib.unescape(text)
-        text_candidates.append(normalize_text(text))
-
-    return max(text_candidates, key=len, default="")
-
-
-def extract_article_text(html: str) -> str:
-    if BeautifulSoup is not None:
-        return extract_with_bs4(html)
-    return extract_with_regex(html)
-
-
-def fetch_content(url: str) -> str:
-    """Fetch a URL and extract the main article text."""
-    if not url:
-        return ""
-    if not robots_allowed(url):
-        log(f"robots.txt disallows fetch: {url}")
-        return ""
-
-    rate_limit_fetch()
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT) as response:
-            content_type = response.headers.get("Content-Type", "")
-            if "text/html" not in content_type and "text/plain" not in content_type:
-                log(f"Skipping non-text response for {url}: {content_type}")
-                return ""
-            charset = response.headers.get_content_charset() or "utf-8"
-            raw = response.read(MAX_FETCH_BYTES)
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
-        log(f"Fetch failed for {url}: {exc}")
-        return ""
-
-    html = raw.decode(charset, errors="replace")
-    return extract_article_text(html)
 
 
 def write_queue_file(num: int, article: dict, directory: str = QUEUE_DIR) -> str:
@@ -319,8 +136,6 @@ def write_queue_file(num: int, article: dict, directory: str = QUEUE_DIR) -> str
         content += f"\n{article['abstract']}\n"
     if article.get('skip_reason'):
         content += f"\n**Skipped at split time:** {article['skip_reason']}\n"
-    if article.get('content') and len(article.get('content', '')) >= FETCH_MIN_CHARS:
-        content += f"\n{article['content']}\n"
     content += f"\n---\n*Collected: {article.get('batch', 'unknown')}*\n"
     Path(path).write_text(content, encoding="utf-8")
     return path
@@ -380,8 +195,7 @@ def parse_collect_block(lines: list, section_header: str) -> list:
     for line in lines:
         stripped = line.strip()
         # Match: - [Title](url) *(Source)* — abstract
-        # Use [^\]]+ and [^)]+ for robust matching (handles HTML tags in titles)
-        m = re.match(r'^- \[([^\]]+)\]\(([^)]*)\)\s*\*\(([^)]*)\)\*\s*(.*)?$', stripped)
+        m = re.match(r'^- \[([^\]]+)\]\(([^)]*)\)\s*\*\(([^)]*)\)\*(.*)?$', stripped)
         if not m:
             # Try without source tag: - [Title](url)
             m = re.match(r'^- \[([^\]]+)\]\(([^)]*)\)\s*(.*)?$', stripped)
@@ -495,12 +309,6 @@ def main():
             if is_duplicate(article["title"], queued_titles):
                 total_skipped += 1
                 continue
-
-            abstract = article.get("abstract", "").strip()
-            if len(abstract) < FETCH_ABSTRACT_THRESHOLD:
-                fetched = fetch_content(article.get("url", ""))
-                if len(fetched) >= FETCH_MIN_CHARS:
-                    article["content"] = fetched
 
             should_skip, reason = should_skip_without_queue(article)
             if should_skip:
