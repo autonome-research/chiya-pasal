@@ -242,7 +242,10 @@ export const prioritize =
               model,
               tools: [],
               maxToolRounds: 1,
-              maxTokens: 1200,
+              // No reasoning needed for a JSON classification — saves ~30s/call.
+              // ~50 tokens output instead of ~1000+.
+              maxTokens: 200,
+              extraBody: { chat_template_kwargs: { enable_thinking: false } },
             },
             [{ role: 'user', content: buildClassifierUserMessage(article) }],
             { client, toolExecutor: noTools, cache: ctx.cache },

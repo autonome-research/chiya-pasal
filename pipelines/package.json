@@ -14,13 +14,15 @@
     "librarian": "tsx src/librarian.ts"
   },
   "dependencies": {
-    "thread-phase": "github:Code4me2/thread-phase#c0e0fe60b75aaf6084918e7188952ec3bcd538ba",
+    "thread-phase": "github:Code4me2/thread-phase#9417e4f4cf8a825c868b1b58760a855806826215",
+    "better-sqlite3": "^11.5.0",
     "glob": "^11.0.0"
   },
   "devDependencies": {
     "typescript": "^5.6.0",
     "tsx": "^4.19.0",
     "@types/node": "^22.0.0",
+    "@types/better-sqlite3": "^7.6.11",
     "vitest": "^2.1.0"
   },
   "engines": {
