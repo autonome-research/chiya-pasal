@@ -85,11 +85,18 @@ log "> Step 3: Dedup + write to raw/inbox/..."
 python3 filter_matcha.py >> "$LOG" 2>&1
 log "[done] Dedup complete"
 
-# Step 4: Split inbox articles into queue files for librarian
-log "> Step 4: Split articles into queue..."
-python3 split_queue.py >> "$LOG" 2>&1
-log "[done] Queue split complete"
-queue_health
+# Step 4: (removed) split_queue.py
+#
+# In the Option-3 librarian, articles flow:
+#   matcha → raw/inbox/YYYY-MM-DD-articles.md → chiya-pipelines `intake` →
+#     ArticleStore → librarian
+#
+# split_queue.py used to fan the inbox file out into raw/inbox/queue/*.md
+# stub files. The librarian no longer reads from queue/ — intake reads the
+# articles file directly. Leaving split_queue.py active here would silently
+# accumulate orphan queue/ stubs every 4h.
+#
+# To re-enable temporarily:  python3 split_queue.py >> "$LOG" 2>&1
 
 log "Collection cycle finished"
 log ""
