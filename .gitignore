@@ -27,3 +27,17 @@ Thumbs.db
 
 # Codex
 .codex
+
+# pipelines/ TS project — track config files explicitly, ignore build artifacts
+!pipelines/package.json
+!pipelines/tsconfig.json
+!pipelines/__tests__/**/*.json
+!pipelines/src/**/*.json
+pipelines/node_modules/
+pipelines/dist/
+pipelines/package-lock.json
+pipelines/*.db
+pipelines/*.db-*
+
+# Reference code (deleted after librarian/digest cutover)
+orchestrator/

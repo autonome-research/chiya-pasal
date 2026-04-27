@@ -1,0 +1,14 @@
+[Unit]
+Description=Chiya digest pipeline (%i)
+Documentation=https://github.com/Code4me2/chiya-library
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/chiya-library/pipelines
+ExecStart=/usr/bin/env npx tsx src/digest.ts %i
+Environment=VAULT_DIR=%h/vault
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=900
+
+# Run-only-once-at-a-time per instance is implicit (Type=oneshot + same instance name).

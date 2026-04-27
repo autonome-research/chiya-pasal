@@ -1,0 +1,10 @@
+[Unit]
+Description=Chiya digest — PM (18:30 local)
+
+[Timer]
+OnCalendar=*-*-* 18:30:00
+Persistent=true
+Unit=chiya-digest@PM.service
+
+[Install]
+WantedBy=timers.target

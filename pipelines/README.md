@@ -1,0 +1,79 @@
+# chiya-pipelines
+
+Curation pipelines for the Chiya Library — TS, built on [`thread-phase`](https://github.com/Code4me2/thread-phase).
+
+Replaces the prior Hermes-hosted prompts (`agents/librarian/prompt.md`, `agents/chiya-digest/prompt.md`) with composable typed phases that run as plain Node processes under systemd user timers.
+
+## Status
+
+| Pipeline | State |
+|---|---|
+| `digest` | implemented, smoke-tested |
+| `librarian` | not yet (next) |
+
+## Setup
+
+```bash
+cd ~/chiya-library/pipelines
+npm install
+npm run build
+```
+
+Inference defaults match the local vLLM + Hermes stack: `http://localhost:8000/v1`, model `qwen3.6-27b`. Override via `INFERENCE_BASE_URL` / `INFERENCE_MODEL` (see `thread-phase`'s `.env.example`).
+
+## Running by hand
+
+```bash
+npm run digest:am      # tsx src/digest.ts AM
+npm run digest:pm      # tsx src/digest.ts PM
+```
+
+Each run logs every event to stdout. Persisted job + event log goes to `$THREAD_PHASE_DB` (default: `<vault>/.chiya-pipelines.db`). Browse history with sqlite directly or via `thread-phase`'s `JobStore.getJob` / `getEvents`.
+
+## systemd install
+
+Versioned units live in `systemd/`. Install with:
+
+```bash
+mkdir -p ~/.config/systemd/user
+ln -sf ~/chiya-library/pipelines/systemd/chiya-digest@.service     ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-am.timer     ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-pm.timer     ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now chiya-digest-am.timer chiya-digest-pm.timer
+systemctl --user list-timers chiya-digest-*
+```
+
+To trigger manually (without waiting for the timer):
+
+```bash
+systemctl --user start chiya-digest@AM.service
+journalctl --user -u 'chiya-digest@AM.service' -f
+```
+
+## Cutting over from Hermes
+
+Disable the Hermes digest jobs in this order — the systemd timers handle both digest curation **and** email send (no separate relay job):
+
+```bash
+hermes cron disable chiya-digest-am chiya-digest-pm chiya-digest-email-am chiya-digest-email-pm
+```
+
+(The librarian remains on Hermes until its pipeline lands.)
+
+## Pipeline shape
+
+```
+digest.ts:
+  loadContext       (pure)   read CLAUDE.md, TASTE, index, log tail, focuses, research/STATUS
+  loadArticles      (pure)   parse raw/inbox/{date}-articles.md  (or raw/ fallback)
+  prioritize        (LLM)    classify each article into focus/notable/followup/skip
+  draftSections     (LLM)    one writer per article-driven section + pure code for library updates
+  assemble          (pure)   format final markdown
+  appendLog         (pure)   record digest entry in vault/log.md
+  commitDigest      (pure)   local git commit
+  squashAndPush     (pure)   fetch → squash unpushed → push to origin
+  emailSend         (pure)   gws gmail +send
+```
+
+Push strategy: many small **local** commits accumulate (librarian and digest both); the digest's `squashAndPush` rebase-squashes everything since the last push into one commit per push. Result on remote: ~2 commits/day max, each summarizing the work since the last push.

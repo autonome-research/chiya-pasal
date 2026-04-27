@@ -1,0 +1,11 @@
+[Unit]
+Description=Chiya digest — AM (06:30 local)
+
+[Timer]
+# 06:30 local, every day. Persistent so we catch up if the machine was off.
+OnCalendar=*-*-* 06:30:00
+Persistent=true
+Unit=chiya-digest@AM.service
+
+[Install]
+WantedBy=timers.target
