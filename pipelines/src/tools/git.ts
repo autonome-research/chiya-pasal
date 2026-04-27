@@ -26,12 +26,26 @@ export class GitOps {
     return out.stdout.trim().length > 0;
   }
 
-  /** Stage all and commit. No-op (returns false) if nothing to commit. */
-  async commit(message: string): Promise<{ committed: boolean; sha?: string }> {
-    if (!(await this.hasChanges())) {
+  /**
+   * Stage explicit pathspecs and commit. No-op (returns false) if nothing to
+   * commit after staging.
+   *
+   * Pathspecs are passed verbatim to `git add`, so they support globs (e.g.
+   * `wiki/`, `log.md`, `index.md`) but won't sweep the working tree the way
+   * `git add -A` does. This keeps unrelated working-tree changes (sqlite WAL
+   * files, freshly-collected matcha output, etc.) out of pipeline commits.
+   */
+  async commit(
+    message: string,
+    pathspecs: string[],
+  ): Promise<{ committed: boolean; sha?: string }> {
+    if (pathspecs.length === 0) return { committed: false };
+    await this.run(['add', '--', ...pathspecs]);
+    // After explicit add, check if anything actually got staged.
+    const staged = await this.run(['diff', '--cached', '--name-only']);
+    if (staged.stdout.trim().length === 0) {
       return { committed: false };
     }
-    await this.run(['add', '-A']);
     await this.run(['commit', '-m', message]);
     const sha = (await this.run(['rev-parse', 'HEAD'])).stdout.trim();
     return { committed: true, sha };

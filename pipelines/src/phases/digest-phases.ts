@@ -485,7 +485,8 @@ export const commitDigest = (git: GitOps): Phase<DigestCtx> => ({
   async *run(ctx) {
     const entry = requireCtx(ctx, 'logEntry', 'commit-digest');
     const summary = entry.trim().replace(/^##\s*/, '');
-    const result = await git.commit(`digest: ${summary}`);
+    // Digest only writes to log.md.
+    const result = await git.commit(`digest: ${summary}`, ['log.md']);
     if (result.committed) {
       yield { type: 'agent_activity', agent: 'commit-digest', action: 'committed', detail: result.sha };
     } else {
