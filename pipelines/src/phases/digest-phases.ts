@@ -21,7 +21,8 @@ import {
 import { boundedFanout } from 'thread-phase/patterns';
 import type OpenAI from 'openai';
 
-import { parseArticles, type Article } from '../shared/article.js';
+import { type Article } from '../shared/article.js';
+import type { ArticleStore, ArticleRow } from '../shared/article-store.js';
 import type {
   Bucket,
   ClassifiedArticle,
@@ -89,60 +90,65 @@ export const loadContext = (vault: VaultFs): Phase<DigestCtx> => ({
 // loadArticles — find today's articles file and parse it
 // ---------------------------------------------------------------------------
 
-export const loadArticles = (vault: VaultFs): Phase<DigestCtx> => ({
+/**
+ * Source of truth for "today's articles" is now the ArticleStore — surfaces
+ * every collection from the day (multiple matcha cron runs), deduped by
+ * url_hash/title_hash. Old behavior pulled a single *-articles.md file and
+ * missed everything from earlier collections that day.
+ *
+ * Falls back to "most recent N days" if today is empty (e.g. running PM
+ * digest on a quiet day before any collection has fired).
+ */
+export const loadArticles = (store: ArticleStore): Phase<DigestCtx> => ({
   name: 'load-articles',
   async *run(ctx) {
-    const candidates: string[] = [];
-    // Today's fresh inbox file (preferred)
-    candidates.push(`raw/inbox/${ctx.date}-articles.md`);
-    // Today's processed file (digest fallback)
-    candidates.push(`raw/${ctx.date}-articles.md`);
+    const todayRows = store.listByDate(ctx.date);
 
-    let chosenPath: string | null = null;
-    for (const c of candidates) {
-      if (await vault.exists(c)) {
-        chosenPath = c;
-        break;
-      }
+    let rows: ArticleRow[] = todayRows;
+    let source = `db: ${ctx.date}`;
+
+    if (rows.length === 0) {
+      // Fall back to the most recent day with any articles.
+      const fallback = recentArticles(store, 3);
+      rows = fallback.rows;
+      source = fallback.source;
     }
 
-    // Fallback: most recent *-articles.md anywhere in raw/inbox/ or raw/
-    if (!chosenPath) {
-      const all = [
-        ...(await vault.list('raw/inbox/*-articles.md')),
-        ...(await vault.list('raw/*-articles.md')),
-      ];
-      if (all.length > 0) {
-        all.sort();
-        chosenPath = all[all.length - 1]!;
-      }
-    }
-
-    if (!chosenPath) {
-      yield {
-        type: 'agent_activity',
-        agent: 'load-articles',
-        action: 'no-articles',
-        detail: 'no articles file found in raw/inbox/ or raw/',
-      };
-      ctx.articles = [];
-      ctx.articlesPath = '';
-      return;
-    }
-
-    const text = await vault.read(chosenPath);
-    const articles = parseArticles(text);
-    ctx.articlesPath = chosenPath;
-    ctx.articles = articles;
+    ctx.articlesPath = source;
+    ctx.articles = rows.map(rowToArticle);
 
     yield {
       type: 'phase',
       phase: 'load-articles',
-      detail: `${articles.length} articles from ${chosenPath}`,
-      counts: { articles: articles.length },
+      detail: `${rows.length} articles (${source})`,
+      counts: { articles: rows.length },
     };
   },
 });
+
+function rowToArticle(r: ArticleRow): Article {
+  return {
+    title: r.title,
+    url: r.url ?? '',
+    source: r.source,
+    field: r.field ?? 'Uncategorized',
+    snippet: r.snippet,
+  };
+}
+
+function recentArticles(store: ArticleStore, lookbackDays: number): {
+  rows: ArticleRow[];
+  source: string;
+} {
+  for (let d = 1; d <= lookbackDays; d++) {
+    const date = new Date(Date.now() - d * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    const rows = store.listByDate(date);
+    if (rows.length > 0) return { rows, source: `db: fallback ${date} (today empty)` };
+  }
+  return { rows: [], source: 'db: empty' };
+}
 
 // ---------------------------------------------------------------------------
 // prioritize — classify each article into a bucket via cheap LLM call

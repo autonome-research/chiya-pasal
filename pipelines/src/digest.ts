@@ -16,6 +16,7 @@ import {
   loadInferenceConfig,
 } from 'thread-phase';
 
+import { ArticleStore } from './shared/article-store.js';
 import { loadChiyaEnv } from './shared/env.js';
 import { GitOps } from './tools/git.js';
 import { VaultFs } from './tools/vault.js';
@@ -55,10 +56,12 @@ async function main(): Promise<void> {
   const vault = new VaultFs(env.vaultDir);
   const git = new GitOps({ vaultDir: env.vaultDir, remote: env.vaultRemote, branch: env.vaultBranch });
   const client = createInferenceClient();
+  const dbPath = process.env.THREAD_PHASE_DB ?? `${env.vaultDir}/.chiya-pipelines.db`;
+  const articleStore = new ArticleStore(dbPath);
 
   const phases = [
     loadContext(vault),
-    loadArticles(vault),
+    loadArticles(articleStore),
     prioritize(client, inferenceConfig.defaultModel),
     draftSections(client, inferenceConfig.defaultModel),
     assemble,
@@ -68,7 +71,6 @@ async function main(): Promise<void> {
     emailSend(env),
   ];
 
-  const dbPath = process.env.THREAD_PHASE_DB ?? `${env.vaultDir}/.chiya-pipelines.db`;
   const store = new SqliteJobStore(dbPath);
   const runner = new JobRunner(store);
 
@@ -96,6 +98,7 @@ async function main(): Promise<void> {
 
   const final = store.getJob(jobId);
   console.log(`[digest] job ${jobId} → ${final?.status}`);
+  articleStore.close();
   if (final?.status === 'FAILED') {
     console.error(`[digest] error: ${final.error}`);
     store.close();
