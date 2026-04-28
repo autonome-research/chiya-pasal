@@ -1,0 +1,13 @@
+[Unit]
+Description=Chiya intake — absorb raw/inbox/*-articles.md into ArticleStore
+Documentation=https://github.com/Code4me2/chiya-library
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/chiya-library/pipelines
+ExecStart=/usr/bin/env npx tsx src/intake.ts
+Environment=VAULT_DIR=%h/vault
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=600

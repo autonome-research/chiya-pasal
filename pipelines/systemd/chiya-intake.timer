@@ -1,0 +1,13 @@
+[Unit]
+Description=Chiya intake — every 4h, ~3 min after the matcha collect cron
+
+[Timer]
+# matcha cron fires at 0,4,8,12,16,20 :00 (Linux cron). Intake runs three
+# minutes later so the collect+filter step has finished writing
+# raw/inbox/YYYY-MM-DD-articles.md.
+OnCalendar=*-*-* 00,04,08,12,16,20:03:00
+Persistent=true
+Unit=chiya-intake.service
+
+[Install]
+WantedBy=timers.target

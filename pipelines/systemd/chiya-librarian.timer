@@ -1,0 +1,18 @@
+[Unit]
+Description=Chiya librarian — DRAIN cadence (every 10 min while backlog)
+
+[Timer]
+# Drain mode: every 10 min on the clock. Each run processes up to 50
+# pending articles with an 8-min deadline, so consecutive runs don't
+# overlap.
+#
+# Steady-state once the backlog is fully drained: change to
+#   OnCalendar=*:0/30
+# (every 30 min — matches the prior Hermes cadence) and `systemctl --user
+# daemon-reload && systemctl --user restart chiya-librarian.timer`.
+OnCalendar=*:0/10
+Persistent=true
+Unit=chiya-librarian.service
+
+[Install]
+WantedBy=timers.target

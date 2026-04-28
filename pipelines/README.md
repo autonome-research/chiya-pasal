@@ -32,34 +32,46 @@ Each run logs every event to stdout. Persisted job + event log goes to `$THREAD_
 
 ## systemd install
 
-Versioned units live in `systemd/`. Install with:
+Versioned units live in `systemd/`. Install all four:
 
 ```bash
 mkdir -p ~/.config/systemd/user
-ln -sf ~/chiya-library/pipelines/systemd/chiya-digest@.service     ~/.config/systemd/user/
-ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-am.timer     ~/.config/systemd/user/
-ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-pm.timer     ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-intake.service     ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-intake.timer       ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-librarian.service  ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-librarian.timer    ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-digest@.service    ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-am.timer    ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-pm.timer    ~/.config/systemd/user/
+
 systemctl --user daemon-reload
-systemctl --user enable --now chiya-digest-am.timer chiya-digest-pm.timer
-systemctl --user list-timers chiya-digest-*
+systemctl --user enable --now \
+  chiya-intake.timer \
+  chiya-librarian.timer \
+  chiya-digest-am.timer \
+  chiya-digest-pm.timer
+
+systemctl --user list-timers chiya-*
 ```
 
-To trigger manually (without waiting for the timer):
+Cadences:
+- **intake** — every 4h at HH:03 (matches matcha collect cron + 3 min)
+- **librarian** — every 10 min (DRAIN mode while the backlog catches up). Switch to every 30 min once `pending` is near zero by editing `chiya-librarian.timer` to `OnCalendar=*:0/30` and `daemon-reload && restart`.
+- **digest** — 06:30 + 18:30 (AM/PM, Persistent=true catches up if the box was off)
 
+Manual triggers:
 ```bash
+systemctl --user start chiya-intake.service
+systemctl --user start chiya-librarian.service
 systemctl --user start chiya-digest@AM.service
-journalctl --user -u 'chiya-digest@AM.service' -f
+journalctl --user -u 'chiya-librarian.service' -f
 ```
 
 ## Cutting over from Hermes
 
-Disable the Hermes digest jobs in this order — the systemd timers handle both digest curation **and** email send (no separate relay job):
+The Hermes chiya jobs were paused via `hermes cron pause <id>`. After a couple of clean cycles on systemd, leave them paused — keep them as a fast revert path. To delete entirely later: `hermes cron rm <id>`.
 
-```bash
-hermes cron disable chiya-digest-am chiya-digest-pm chiya-digest-email-am chiya-digest-email-pm
-```
-
-(The librarian remains on Hermes until its pipeline lands.)
+The Hermes `vault-daily-lint` job (midnight) is independent — leave active.
 
 ## Pipeline shape
 

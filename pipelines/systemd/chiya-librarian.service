@@ -1,0 +1,15 @@
+[Unit]
+Description=Chiya librarian — drain pending articles from the queue
+Documentation=https://github.com/Code4me2/chiya-library
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/chiya-library/pipelines
+ExecStart=/usr/bin/env npx tsx src/librarian.ts --batch=50 --minutes=8
+Environment=VAULT_DIR=%h/vault
+StandardOutput=journal
+StandardError=journal
+# Hard cap a run; the script's --minutes deadline rolls over articles
+# before this fires. Buffer so cleanup has time.
+TimeoutStartSec=720
