@@ -11,10 +11,11 @@ WorkingDirectory=%h/chiya-library/pipelines
 # in-flight LLM calls aren't cancellable yet (see thread-phase ROADMAP);
 # in-flight articles must finish before the run exits, so the systemd
 # timeout needs slack over the deadline for the tail.
-ExecStart=/usr/bin/env npx tsx src/librarian.ts --batch=20 --minutes=6
+ExecStart=/usr/bin/env npx tsx src/librarian.ts --batch=10 --minutes=8
 Environment=VAULT_DIR=%h/vault
 StandardOutput=journal
 StandardError=journal
-# Generous timeout: --minutes=6 plus up to ~9 min for the 4 in-flight
-# articles to finish their current LLM call after the deadline fires.
-TimeoutStartSec=900
+# Headroom for the 26b upsert model: --minutes=8 deadline plus generous
+# slack for 4 in-flight articles to finish (each upsert can run 60-90s on
+# 26b vs ~20s on e4b). Smaller batch (10) reduces in-flight tail.
+TimeoutStartSec=1200

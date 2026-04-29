@@ -248,10 +248,9 @@ export const prioritize =
               model,
               tools: [],
               maxToolRounds: 1,
-              // No reasoning needed for a JSON classification — saves ~30s/call.
-              // ~50 tokens output instead of ~1000+.
-              maxTokens: 200,
-              extraBody: { chat_template_kwargs: { enable_thinking: false } },
+              // gemma4:e4b reasons by default; ~150-300 tokens of reasoning
+              // trace before the JSON output. 800 leaves headroom.
+              maxTokens: 800,
             },
             [{ role: 'user', content: buildClassifierUserMessage(article) }],
             { client, toolExecutor: noTools, cache: ctx.cache },

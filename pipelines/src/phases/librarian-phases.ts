@@ -236,11 +236,53 @@ export const processBatch =
                 indexDeltas: upsert.indexDeltas,
               };
             }
-            store.markDone(article.id, upsert.paths);
+
+            // Defensive validation: smaller models confabulate "I created
+            // page X" without actually calling vault_write. Verify every
+            // claimed path actually exists on disk before recording done.
+            // If validation fails, mark the row failed so it gets retried
+            // by reapStaleProcessing on a later run with a stronger model.
+            const validatedPaths: string[] = [];
+            const ghostPaths: string[] = [];
+            for (const p of upsert.paths) {
+              if (await vault.exists(p)) {
+                validatedPaths.push(p);
+              } else {
+                ghostPaths.push(p);
+              }
+            }
+            if (ghostPaths.length > 0) {
+              const reason = `agent claimed paths that don't exist: ${ghostPaths.slice(0, 3).join(', ')}${ghostPaths.length > 3 ? '…' : ''}`;
+              store.markFailed(article.id, reason);
+              return {
+                articleId: article.id,
+                outcome: 'failed',
+                reason,
+                pagePaths: [],
+                // Drop the agent's logEntry/indexDeltas — they reference
+                // the ghost paths.
+                indexDeltas: [],
+              };
+            }
+            if (validatedPaths.length === 0) {
+              // Action wasn't 'skipped' but nothing got written. Treat as
+              // failed (probably a parse/JSON-truncation issue).
+              const reason = `action='${upsert.action}' but paths[] empty`;
+              store.markFailed(article.id, reason);
+              return {
+                articleId: article.id,
+                outcome: 'failed',
+                reason,
+                pagePaths: [],
+                indexDeltas: [],
+              };
+            }
+
+            store.markDone(article.id, validatedPaths);
             return {
               articleId: article.id,
               outcome: 'done',
-              pagePaths: upsert.paths,
+              pagePaths: validatedPaths,
               logEntry: upsert.logEntry,
               indexDeltas: upsert.indexDeltas,
             };
@@ -298,8 +340,9 @@ async function callTriage(
       model,
       tools: [],
       maxToolRounds: 1,
-      maxTokens: 200,
-      extraBody: { chat_template_kwargs: { enable_thinking: false } },
+      // gemma4:e4b reasons by default and we can't disable it; ~150-300 tokens
+      // of reasoning trace before the JSON output. 800 leaves headroom.
+      maxTokens: 800,
     },
     [
       {
