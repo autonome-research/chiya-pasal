@@ -1,0 +1,23 @@
+[Unit]
+Description=SSH tunnel: localhost:11435 → tiny-emerson:11434 (Ollama for librarian upsert)
+After=network-online.target
+
+[Service]
+Type=simple
+# Reverse-tunnel tiny-emerson's localhost-bound Ollama to a port on this box.
+# -N: no remote command. -L: local-forward. ServerAliveInterval keeps the
+# tunnel alive across NAT/sleep. ExitOnForwardFailure aborts fast if the
+# forward can't bind.
+ExecStart=/usr/bin/ssh \
+  -NL 11435:127.0.0.1:11434 \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o ExitOnForwardFailure=yes \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=accept-new \
+  tiny@tiny-emerson
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

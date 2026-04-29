@@ -6,10 +6,15 @@ After=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=%h/chiya-library/pipelines
-ExecStart=/usr/bin/env npx tsx src/librarian.ts --batch=50 --minutes=8
+# --batch=20 keeps the predictable 4-conc × ~60s/upsert × 80%-keep wall
+# time well under --minutes=6. Smaller-than-it-looks-necessary because
+# in-flight LLM calls aren't cancellable yet (see thread-phase ROADMAP);
+# in-flight articles must finish before the run exits, so the systemd
+# timeout needs slack over the deadline for the tail.
+ExecStart=/usr/bin/env npx tsx src/librarian.ts --batch=20 --minutes=6
 Environment=VAULT_DIR=%h/vault
 StandardOutput=journal
 StandardError=journal
-# Hard cap a run; the script's --minutes deadline rolls over articles
-# before this fires. Buffer so cleanup has time.
-TimeoutStartSec=720
+# Generous timeout: --minutes=6 plus up to ~9 min for the 4 in-flight
+# articles to finish their current LLM call after the deadline fires.
+TimeoutStartSec=900

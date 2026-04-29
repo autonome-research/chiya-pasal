@@ -16,12 +16,11 @@ import {
   PipelineCache,
   SqliteJobStore,
   JobRunner,
-  createInferenceClient,
-  loadInferenceConfig,
 } from 'thread-phase';
+import OpenAI from 'openai';
 
 import { ArticleStore } from './shared/article-store.js';
-import { loadChiyaEnv } from './shared/env.js';
+import { loadChiyaEnv, type InferenceTarget } from './shared/env.js';
 import { GitOps } from './tools/git.js';
 import { VaultFs } from './tools/vault.js';
 import {
@@ -50,14 +49,19 @@ function parseArgs(): Args {
   return { batchSize, minutes };
 }
 
+function clientFor(target: InferenceTarget): OpenAI {
+  return new OpenAI({ baseURL: target.baseUrl, apiKey: target.apiKey });
+}
+
 async function main(): Promise<void> {
   const { batchSize, minutes } = parseArgs();
   const env = loadChiyaEnv();
-  const inferenceConfig = loadInferenceConfig();
   const dbPath = process.env.THREAD_PHASE_DB ?? `${env.vaultDir}/.chiya-pipelines.db`;
 
   console.log(
-    `[librarian] vault=${env.vaultDir} db=${dbPath} model=${inferenceConfig.defaultModel} batch=${batchSize} minutes=${minutes}`,
+    `[librarian] vault=${env.vaultDir} db=${dbPath} batch=${batchSize} minutes=${minutes}\n` +
+      `           triage: ${env.fast.baseUrl}/${env.fast.model}\n` +
+      `           upsert: ${env.tools.baseUrl}/${env.tools.model}`,
   );
 
   const vault = new VaultFs(env.vaultDir);
@@ -65,12 +69,22 @@ async function main(): Promise<void> {
   const store = new ArticleStore(dbPath);
   const jobStore = new SqliteJobStore(dbPath);
   const runner = new JobRunner(jobStore);
-  const client = createInferenceClient();
 
+  // Triage runs on the fast no-tool model (mb:8005).
+  // Upsert runs locally — only target with --enable-auto-tool-choice.
   const phases = [
     reapStale(store),
     loadBatch(store),
-    processBatch(client, inferenceConfig.defaultModel, store, vault),
+    processBatch(
+      {
+        triageClient: clientFor(env.fast),
+        triageModel: env.fast.model,
+        upsertClient: clientFor(env.tools),
+        upsertModel: env.tools.model,
+      },
+      store,
+      vault,
+    ),
     mergeMetadata(vault),
     commitLocal(git),
   ];

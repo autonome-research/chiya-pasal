@@ -12,12 +12,11 @@ import {
   PipelineCache,
   SqliteJobStore,
   JobRunner,
-  createInferenceClient,
-  loadInferenceConfig,
 } from 'thread-phase';
+import OpenAI from 'openai';
 
 import { ArticleStore } from './shared/article-store.js';
-import { loadChiyaEnv } from './shared/env.js';
+import { loadChiyaEnv, type InferenceTarget } from './shared/env.js';
 import { GitOps } from './tools/git.js';
 import { VaultFs } from './tools/vault.js';
 import {
@@ -46,24 +45,30 @@ function parseDirection(): DigestDirection {
   return arg;
 }
 
+function clientFor(target: InferenceTarget): OpenAI {
+  return new OpenAI({ baseURL: target.baseUrl, apiKey: target.apiKey });
+}
+
 async function main(): Promise<void> {
   const direction = parseDirection();
   const env = loadChiyaEnv();
-  const inferenceConfig = loadInferenceConfig();
 
-  console.log(`[digest] direction=${direction} vault=${env.vaultDir} model=${inferenceConfig.defaultModel}`);
+  console.log(
+    `[digest] direction=${direction} vault=${env.vaultDir} fast=${env.fast.baseUrl}/${env.fast.model}`,
+  );
 
   const vault = new VaultFs(env.vaultDir);
   const git = new GitOps({ vaultDir: env.vaultDir, remote: env.vaultRemote, branch: env.vaultBranch });
-  const client = createInferenceClient();
+  // Digest has no tool calls — everything routes through the fast client.
+  const fastClient = clientFor(env.fast);
   const dbPath = process.env.THREAD_PHASE_DB ?? `${env.vaultDir}/.chiya-pipelines.db`;
   const articleStore = new ArticleStore(dbPath);
 
   const phases = [
     loadContext(vault),
     loadArticles(articleStore),
-    prioritize(client, inferenceConfig.defaultModel),
-    draftSections(client, inferenceConfig.defaultModel),
+    prioritize(fastClient, env.fast.model),
+    draftSections(fastClient, env.fast.model),
     assemble,
     appendLog(vault),
     commitDigest(git),

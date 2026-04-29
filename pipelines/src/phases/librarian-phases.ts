@@ -138,10 +138,18 @@ ${taste.slice(0, 1500) || '(empty)'}
 ## Wiki index excerpt (first 4k chars)
 ${index.slice(0, 4000)}`;
 
+export interface ProcessBatchClients {
+  /** Fast no-tool model for the triage gate. */
+  triageClient: OpenAI;
+  triageModel: string;
+  /** Tool-capable model for wiki upsert (vault read/write + web fetch). */
+  upsertClient: OpenAI;
+  upsertModel: string;
+}
+
 export const processBatch =
   (
-    client: OpenAI,
-    model: string,
+    clients: ProcessBatchClients,
     store: ArticleStore,
     vault: VaultFs,
     concurrency: number = 4,
@@ -195,7 +203,7 @@ export const processBatch =
           }
 
           // Triage call
-          const triage = await callTriage(client, model, article);
+          const triage = await callTriage(clients.triageClient, clients.triageModel, article);
           if (!triage.keep) {
             store.markSkipped(article.id, triage.reason);
             return {
@@ -210,7 +218,13 @@ export const processBatch =
 
           // Upsert call
           try {
-            const upsert = await callUpsert(client, model, upsertSystem, article, buildRegistry());
+            const upsert = await callUpsert(
+              clients.upsertClient,
+              clients.upsertModel,
+              upsertSystem,
+              article,
+              buildRegistry(),
+            );
             if (upsert.action === 'skipped') {
               store.markSkipped(article.id, upsert.reason);
               return {
