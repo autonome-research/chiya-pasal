@@ -184,6 +184,35 @@ export class ArticleStore {
     return rows.map(toArticleRow);
   }
 
+  /**
+   * Articles collected during a given LOCAL calendar day (YYYY-MM-DD in the
+   * machine's local timezone), translated into the corresponding UTC range
+   * for the SQL query. Use this from the digest, whose schedule and human
+   * framing are local-time but whose `collected_at` column is UTC.
+   *
+   * Example: in PT, the PM digest fires at 18:30 local = 01:30/02:30 UTC the
+   * next day. listByDate(utcToday) misses everything; listByLocalDate('PT
+   * today') correctly spans 07:00 UTC today through 07:00 UTC tomorrow (PDT)
+   * or 08:00 through 08:00 (PST).
+   */
+  listByLocalDate(localYmd: string): ArticleRow[] {
+    const [y, m, d] = localYmd.split('-').map(Number);
+    if (!y || !m || !d) return [];
+    // `new Date(y, m-1, d)` constructs a local-midnight Date; toISOString
+    // converts to the corresponding UTC instant. SQLite stores collected_at
+    // as 'YYYY-MM-DD HH:MM:SS' UTC text, comparable lexicographically.
+    const startUtc = new Date(y, m - 1, d, 0, 0, 0, 0);
+    const endUtc = new Date(y, m - 1, d + 1, 0, 0, 0, 0);
+    const fmt = (dt: Date): string => dt.toISOString().slice(0, 19).replace('T', ' ');
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM article WHERE collected_at >= ? AND collected_at < ?
+         ORDER BY id ASC`,
+      )
+      .all(fmt(startUtc), fmt(endUtc)) as RawRow[];
+    return rows.map(toArticleRow);
+  }
+
   getById(id: number): ArticleRow | null {
     const row = this.db.prepare(`SELECT * FROM article WHERE id = ?`).get(id) as RawRow | undefined;
     return row ? toArticleRow(row) : null;

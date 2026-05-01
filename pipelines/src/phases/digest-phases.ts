@@ -102,7 +102,7 @@ export const loadContext = (vault: VaultFs): Phase<DigestCtx> => ({
 export const loadArticles = (store: ArticleStore): Phase<DigestCtx> => ({
   name: 'load-articles',
   async *run(ctx) {
-    const todayRows = store.listByDate(ctx.date);
+    const todayRows = store.listByLocalDate(ctx.date);
 
     let rows: ArticleRow[] = todayRows;
     let source = `db: ${ctx.date}`;
@@ -140,11 +140,12 @@ function recentArticles(store: ArticleStore, lookbackDays: number): {
   rows: ArticleRow[];
   source: string;
 } {
+  // Walk local calendar days, same framing as ctx.date — see listByLocalDate.
   for (let d = 1; d <= lookbackDays; d++) {
-    const date = new Date(Date.now() - d * 24 * 60 * 60 * 1000)
-      .toISOString()
-      .slice(0, 10);
-    const rows = store.listByDate(date);
+    const dt = new Date();
+    dt.setDate(dt.getDate() - d);
+    const date = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+    const rows = store.listByLocalDate(date);
     if (rows.length > 0) return { rows, source: `db: fallback ${date} (today empty)` };
   }
   return { rows: [], source: 'db: empty' };

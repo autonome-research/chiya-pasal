@@ -123,6 +123,30 @@ describe('ArticleStore.listByDate / countByStatus', () => {
     expect(store.listByDate('2026-04-26').map((r) => r.title)).toEqual(['B']);
   });
 
+  it('listByLocalDate spans the local-day window in UTC terms', () => {
+    // Pick a Date created in local time so we know exactly which UTC instants
+    // bracket "that local day" in the current TZ. Two articles bracket the
+    // local day's edges; a third sits squarely in the middle of the next
+    // local day. Only the bracketing pair should match.
+    const localDay = new Date(2026, 3, 27, 12, 0, 0); // local noon, 2026-04-27
+    const justAfterMidnight = new Date(2026, 3, 27, 0, 0, 30); // local
+    const justBeforeMidnight = new Date(2026, 3, 27, 23, 59, 30); // local
+    const nextDayNoon = new Date(2026, 3, 28, 12, 0, 0); // local
+    const ymd = `${localDay.getFullYear()}-${String(localDay.getMonth() + 1).padStart(2, '0')}-${String(localDay.getDate()).padStart(2, '0')}`;
+
+    store.upsertPending({ ...baseInput, title: 'EARLY', url: 'https://e.com/early', collectedAt: justAfterMidnight });
+    store.upsertPending({ ...baseInput, title: 'LATE', url: 'https://e.com/late', collectedAt: justBeforeMidnight });
+    store.upsertPending({ ...baseInput, title: 'NEXT', url: 'https://e.com/next', collectedAt: nextDayNoon });
+
+    const titles = store.listByLocalDate(ymd).map((r) => r.title).sort();
+    expect(titles).toEqual(['EARLY', 'LATE']);
+  });
+
+  it('listByLocalDate returns empty for unparseable input rather than throwing', () => {
+    expect(store.listByLocalDate('not-a-date')).toEqual([]);
+    expect(store.listByLocalDate('')).toEqual([]);
+  });
+
   it('countByStatus returns full record', () => {
     const a = store.upsertPending({ ...baseInput, title: 'A', url: 'https://e.com/a' }).id!;
     const b = store.upsertPending({ ...baseInput, title: 'B', url: 'https://e.com/b' }).id!;
