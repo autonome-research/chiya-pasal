@@ -115,7 +115,7 @@ Process:
    - File under the right dir: entities/, topics/<field>/, projects/, research/<project>/
    - Topic pages should synthesize across sources, not just summarize this one
 
-Tag taxonomy is documented in ~/vault/CLAUDE.md if you need to look it up.
+Tag taxonomy is documented in CLAUDE.md at the vault root. Before you assign tags, call vault_read("CLAUDE.md") and use only tags from the "Tag taxonomy" section. Do not invent new tags.
 
 After writing, respond with:
 {
