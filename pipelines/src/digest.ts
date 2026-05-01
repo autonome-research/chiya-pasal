@@ -32,8 +32,16 @@ import {
 } from './phases/digest-phases.js';
 import type { DigestCtx, DigestDirection } from './shared/digest-types.js';
 
-function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
+function todayLocal(): string {
+  // Local calendar day, not UTC. The digest's systemd timers fire at local
+  // 06:30 / 18:30; the human-facing "today" should match the user's wall
+  // clock, and ArticleStore.listByLocalDate translates this into the right
+  // UTC range for the query against collected_at.
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 function parseDirection(): DigestDirection {
@@ -82,10 +90,18 @@ async function main(): Promise<void> {
   const ctx: DigestCtx = {
     cache: new PipelineCache(),
     direction,
-    date: todayISO(),
+    date: todayLocal(),
   };
 
-  const jobId = runner.create('chiya-digest', { direction, date: ctx.date });
+  // acquireExclusive: prevent overlapping digest runs (e.g. an AM run that
+  // overruns into PM) from racing on git/email side effects.
+  const jobId = store.acquireExclusive('chiya-digest', { direction, date: ctx.date });
+  if (!jobId) {
+    console.log('[digest] another digest run is already in flight — exiting cleanly');
+    articleStore.close();
+    store.close();
+    return;
+  }
 
   // Mirror events to stdout for live observation under systemd journal.
   runner.on(`job:${jobId}`, (e: { eventType: string; data: unknown }) => {

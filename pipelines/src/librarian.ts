@@ -95,7 +95,17 @@ async function main(): Promise<void> {
     deadlineAt: new Date(Date.now() + minutes * 60 * 1000),
   };
 
-  const jobId = runner.create('chiya-librarian', { batchSize, minutes });
+  // acquireExclusive: refuse to start a second librarian if one is already
+  // RUNNING under this name. The 10-minute systemd cadence + 25-minute soft
+  // deadline means overlap is plausible; without this, two runs could both
+  // pull the same pending rows from ArticleStore and double-process them.
+  const jobId = jobStore.acquireExclusive('chiya-librarian', { batchSize, minutes });
+  if (!jobId) {
+    console.log('[librarian] another run is already in flight — exiting cleanly');
+    store.close();
+    jobStore.close();
+    return;
+  }
   runner.on(`job:${jobId}`, (e: { eventType: string; data: unknown }) =>
     console.log(`[event:${e.eventType}]`, JSON.stringify(e.data)),
   );
