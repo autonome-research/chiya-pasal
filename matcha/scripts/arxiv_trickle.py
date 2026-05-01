@@ -30,14 +30,17 @@ from pathlib import Path
 VAULT_DIR = os.environ.get("VAULT_DIR", os.path.expanduser("~/vault"))
 INBOX_DIR = os.path.join(VAULT_DIR, "raw", "inbox")
 
-# arXiv queries extracted from CORE_QUERIES in api_ingest.py
+# Category-based queries — robust against arXiv's strict query parser.
+# Plain free-text queries (e.g. "large language models transformer") return HTTP 400.
 ARXIV_QUERIES = [
-    ("large language models transformer reinforcement learning", "AI/ML"),
-    ("quantum computing quantum information physics", "Physics"),
-    ("deep learning computer vision AI architecture", "AI/ML"),
-    ("cybersecurity cryptography threat intelligence", "Cybersecurity"),
-    ("robotics autonomous systems reinforcement", "Robotics"),
-    ("space technology aerospace satellite", "Space/Aerospace"),
+    ("cat:cs.AI", "AI/ML"),
+    ("cat:cs.LG", "AI/ML"),
+    ("cat:cs.CL", "AI/ML"),
+    ("cat:cs.CV", "AI/ML"),
+    ("cat:cs.RO", "Robotics"),
+    ("cat:cs.CR", "Cybersecurity"),
+    ("cat:quant-ph", "Physics"),
+    ("cat:astro-ph.IM", "Space/Aerospace"),
 ]
 
 RESULTS_PER_QUERY = 20       # max_results per arXiv query
@@ -86,10 +89,12 @@ def fetch_arxiv(query, max_results=20):
     """Fetch articles from arXiv API, sorted by submission date (newest first).
     Returns list of article dicts.
     """
+    # `safe=':+'` keeps category prefixes (cat:cs.AI) and boolean joins (+AND+) intact;
+    # `urllib.parse.quote` would otherwise percent-encode `:` and break arXiv's parser.
     url = (f"http://export.arxiv.org/api/query?"
-           f"search_query={urllib.parse.quote(query)}"
+           f"search_query={urllib.parse.quote(query, safe=':+')}"
            f"&start=0&max_results={max_results}"
-           f"&sortBy=submissionDate&sortOrder=descending")
+           f"&sortBy=submittedDate&sortOrder=descending")
 
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "ChiyaLibrary/1.0"})
@@ -97,16 +102,19 @@ def fetch_arxiv(query, max_results=20):
         raw = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         if e.code == 429:
-            log(f"  ⏳ Rate limited, waiting 10s...")
+            log(f"  ⏳ Rate limited (429), waiting 10s...")
             time.sleep(10)
+        else:
+            log(f"  ⚠️ HTTP {e.code} for query '{query}': {e.reason}")
         return []
     except Exception as e:
-        log(f"  ⚠️ Request failed: {e}")
+        log(f"  ⚠️ Request failed for '{query}': {e}")
         return []
 
     try:
         root = ET.fromstring(raw)
-    except ET.ParseError:
+    except ET.ParseError as e:
+        log(f"  ⚠️ XML parse error for '{query}': {e}")
         return []
 
     ns = {"atom": "http://www.w3.org/2005/Atom"}
@@ -138,9 +146,21 @@ def fetch_arxiv(query, max_results=20):
     return articles
 
 
-def write_to_inbox(articles):
+def _format_line(art):
+    """Match the parser regex in pipelines/src/shared/article.ts:
+    - [title](url) *(source)* — snippet
+    """
+    title = art["title"].replace("[", "(").replace("]", ")")
+    snippet = (art.get("abstract_short") or "").replace("\n", " ").strip()
+    suffix = f" — {snippet}" if snippet else ""
+    return f"- [{title}]({art['url']}) *({art['source']})*{suffix}"
+
+
+def write_to_inbox(articles, field):
     """Append articles to VAULT_DIR/raw/inbox/YYYY-MM-DD-articles.md.
     Articles should be pre-filtered for dedup before calling.
+    Emits the same shape filter_matcha.py does (frontmatter + #### field +
+    `- [title](url) *(source)* — snippet`) so the librarian's parser picks it up.
     Returns count of articles written.
     """
     if not articles:
@@ -150,17 +170,28 @@ def write_to_inbox(articles):
     inbox_path = os.path.join(INBOX_DIR, f"{today}-articles.md")
 
     os.makedirs(INBOX_DIR, exist_ok=True)
+    is_new = not os.path.exists(inbox_path)
 
     with open(inbox_path, "a", encoding="utf-8") as f:
-        f.write(f"\n## Trickle Scraped — {datetime.now().strftime('%H:%M')} arXiv\n\n")
+        if is_new:
+            f.write("---\n")
+            f.write("source: arxiv-trickle\n")
+            f.write(f"clipped: {datetime.now().isoformat()}\n")
+            f.write("contributor: scheduled:arxiv-trickle\n")
+            f.write("type: article\n")
+            f.write("tags: [auto-collected, research, arxiv-trickle]\n")
+            f.write("---\n\n")
+            f.write(f"# Raw Articles — {today}\n\n")
+            f.write("> Auto-collected from arXiv trickle scraper. Deduplicated. Awaiting ingest.\n\n")
+
+        f.write("---\n")
+        f.write(f"### Trickle scraped at {datetime.now().strftime('%H:%M')} — arXiv\n")
+        f.write(f"### {len(articles)} new articles\n\n")
+        f.write(f"#### {field}\n")
         for a in articles:
             seen_urls.add(a["url"].lower())
-            f.write(f"- **{a['title']}**\n")
-            f.write(f"  - Source: [{a['source']}]({a['url']})\n")
-            f.write(f"  - Date: {a['date']}\n")
-            if a.get("abstract_short"):
-                f.write(f"  - {a['abstract_short']}...\n")
-            f.write("\n")
+            f.write(_format_line(a) + "\n")
+        f.write("\n")
 
     return len(articles)
 
@@ -179,7 +210,7 @@ def main():
             cycle_start = time.time()
             new_this_cycle = 0
 
-            for query, domain in ARXIV_QUERIES:
+            for query, field in ARXIV_QUERIES:
                 # Random delay before each request (arXiv rate limit)
                 delay = random.uniform(MIN_DELAY, MAX_DELAY)
                 time.sleep(delay)
@@ -192,7 +223,7 @@ def main():
                 seen_urls.update(a["url"].lower() for a in articles)
 
                 if new_articles:
-                    written = write_to_inbox(new_articles)
+                    written = write_to_inbox(new_articles, field)
                     total_written += written
                     new_this_cycle += written
 
