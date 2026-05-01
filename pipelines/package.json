@@ -16,7 +16,7 @@
     "migrate-queue": "tsx src/migrate-queue.ts"
   },
   "dependencies": {
-    "thread-phase": "github:Code4me2/thread-phase#2787f7374723224516d36efedec0905f4a7ae90d",
+    "thread-phase": "github:Code4me2/thread-phase#88b16b0e02f06c672c5ebdb3379a31d2ae97cff0",
     "better-sqlite3": "^11.5.0",
     "glob": "^11.0.0"
   },
