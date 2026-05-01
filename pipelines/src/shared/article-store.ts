@@ -199,6 +199,17 @@ export class ArticleStore {
       .run(id);
   }
 
+  /**
+   * Roll a row back to 'pending' (clearing processed_at). Used by the
+   * deadline-rollover path: if a librarian run hits its soft deadline,
+   * the in-flight worker returns the row to the queue for the next run.
+   */
+  markPending(id: number): void {
+    this.db
+      .prepare(`UPDATE article SET status='pending', processed_at=NULL WHERE id=?`)
+      .run(id);
+  }
+
   markDone(id: number, pagePaths: string[]): void {
     this.db
       .prepare(

@@ -193,12 +193,7 @@ export const processBatch =
           // Past the deadline? Mark this article back to pending so a
           // future run picks it up, return a soft "skipped:deadline".
           if (Date.now() > ctx.deadlineAt.getTime()) {
-            const db = (store as unknown as {
-              db: { prepare: (q: string) => { run: (...a: unknown[]) => unknown } };
-            }).db;
-            db.prepare(
-              `UPDATE article SET status='pending', processed_at=NULL WHERE id=?`,
-            ).run(article.id);
+            store.markPending(article.id);
             return { articleId: article.id, outcome: 'skipped', reason: 'deadline-rolled-over', pagePaths: [], indexDeltas: [] };
           }
 
