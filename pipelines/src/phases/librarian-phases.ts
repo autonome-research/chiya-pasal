@@ -186,19 +186,40 @@ export const processBatch =
         detail: `${batch.length} articles, concurrency=${concurrency}`,
       };
 
-      const results: ArticleResult[] = await boundedFanout({
+      // mode: 'collect' lets the runner throw on backend errors (callUpsert
+      // network failure, vault permission denied, etc.) and returns a
+      // FanOutResult per article instead of rejecting the whole fanout.
+      // `signal` is captured by closure rather than passed into boundedFanout
+      // so the soft-deadline can stop new dispatches *and* unwind in-flight
+      // LLM calls without triggering boundedFanout's hard-cancel rejection
+      // at the post-loop signal check.
+      const fanoutResults = await boundedFanout({
         items: batch,
         concurrency,
+        mode: 'collect' as const,
         runner: async (article): Promise<ArticleResult> => {
-          // Past the deadline? Mark this article back to pending so a
-          // future run picks it up, return a soft "skipped:deadline".
-          if (Date.now() > ctx.deadlineAt.getTime()) {
+          // Deadline already fired before this article was dispatched. Roll
+          // it back to pending and return a soft-skip; no LLM call made.
+          if (ctx.signal.aborted) {
             store.markPending(article.id);
-            return { articleId: article.id, outcome: 'skipped', reason: 'deadline-rolled-over', pagePaths: [], indexDeltas: [] };
+            return {
+              articleId: article.id,
+              outcome: 'skipped',
+              reason: 'deadline-rolled-over',
+              pagePaths: [],
+              indexDeltas: [],
+            };
           }
 
-          // Triage call
-          const triage = await callTriage(clients.triageClient, clients.triageModel, article);
+          // Triage call. Signal forwarded into runAgentWithTools so an
+          // in-flight stream gets aborted on deadline; that throws an
+          // AbortError which the collect mode catches as a per-item error.
+          const triage = await callTriage(
+            clients.triageClient,
+            clients.triageModel,
+            article,
+            ctx.signal,
+          );
           if (!triage.keep) {
             store.markSkipped(article.id, triage.reason);
             return {
@@ -211,93 +232,114 @@ export const processBatch =
             };
           }
 
-          // Upsert call
-          try {
-            const upsert = await callUpsert(
-              clients.upsertClient,
-              clients.upsertModel,
-              upsertSystem,
-              article,
-              buildRegistry(),
-            );
-            if (upsert.action === 'skipped') {
-              store.markSkipped(article.id, upsert.reason);
-              return {
-                articleId: article.id,
-                outcome: 'skipped',
-                reason: upsert.reason,
-                pagePaths: [],
-                logEntry: upsert.logEntry,
-                indexDeltas: upsert.indexDeltas,
-              };
-            }
-
-            // Defensive validation: smaller models confabulate "I created
-            // page X" without actually calling vault_write. Verify every
-            // claimed path actually exists on disk before recording done.
-            // If validation fails, mark the row failed so it gets retried
-            // by reapStaleProcessing on a later run with a stronger model.
-            const validatedPaths: string[] = [];
-            const ghostPaths: string[] = [];
-            for (const p of upsert.paths) {
-              if (await vault.exists(p)) {
-                validatedPaths.push(p);
-              } else {
-                ghostPaths.push(p);
-              }
-            }
-            if (ghostPaths.length > 0) {
-              const reason = `agent claimed paths that don't exist: ${ghostPaths.slice(0, 3).join(', ')}${ghostPaths.length > 3 ? '…' : ''}`;
-              store.markFailed(article.id, reason);
-              return {
-                articleId: article.id,
-                outcome: 'failed',
-                reason,
-                pagePaths: [],
-                // Drop the agent's logEntry/indexDeltas — they reference
-                // the ghost paths.
-                indexDeltas: [],
-              };
-            }
-            if (validatedPaths.length === 0) {
-              // Action wasn't 'skipped' but nothing got written. Treat as
-              // failed (probably a parse/JSON-truncation issue).
-              const reason = `action='${upsert.action}' but paths[] empty`;
-              store.markFailed(article.id, reason);
-              return {
-                articleId: article.id,
-                outcome: 'failed',
-                reason,
-                pagePaths: [],
-                indexDeltas: [],
-              };
-            }
-
-            store.markDone(article.id, validatedPaths);
+          // Upsert call. Same signal threading. No try/catch around it —
+          // mode: 'collect' captures throws into onItemError + a
+          // {ok: false, error} result slot, which the post-loop maps to
+          // an outcome:'failed' (or 'skipped' for AbortError).
+          const upsert = await callUpsert(
+            clients.upsertClient,
+            clients.upsertModel,
+            upsertSystem,
+            article,
+            buildRegistry(),
+            ctx.signal,
+          );
+          if (upsert.action === 'skipped') {
+            store.markSkipped(article.id, upsert.reason);
             return {
               articleId: article.id,
-              outcome: 'done',
-              pagePaths: validatedPaths,
+              outcome: 'skipped',
+              reason: upsert.reason,
+              pagePaths: [],
               logEntry: upsert.logEntry,
               indexDeltas: upsert.indexDeltas,
             };
-          } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            store.markFailed(article.id, msg.slice(0, 200));
+          }
+
+          // Defensive validation: smaller models confabulate "I created
+          // page X" without actually calling vault_write. Verify every
+          // claimed path actually exists on disk before recording done.
+          // Validation failures stay structured (not thrown) — they are
+          // semantic outcomes, not exceptions.
+          const validatedPaths: string[] = [];
+          const ghostPaths: string[] = [];
+          for (const p of upsert.paths) {
+            if (await vault.exists(p)) {
+              validatedPaths.push(p);
+            } else {
+              ghostPaths.push(p);
+            }
+          }
+          if (ghostPaths.length > 0) {
+            const reason = `agent claimed paths that don't exist: ${ghostPaths.slice(0, 3).join(', ')}${ghostPaths.length > 3 ? '…' : ''}`;
+            store.markFailed(article.id, reason);
             return {
               articleId: article.id,
               outcome: 'failed',
-              reason: msg.slice(0, 200),
+              reason,
+              pagePaths: [],
+              // Drop the agent's logEntry/indexDeltas — they reference
+              // the ghost paths.
+              indexDeltas: [],
+            };
+          }
+          if (validatedPaths.length === 0) {
+            const reason = `action='${upsert.action}' but paths[] empty`;
+            store.markFailed(article.id, reason);
+            return {
+              articleId: article.id,
+              outcome: 'failed',
+              reason,
               pagePaths: [],
               indexDeltas: [],
             };
           }
+
+          store.markDone(article.id, validatedPaths);
+          return {
+            articleId: article.id,
+            outcome: 'done',
+            pagePaths: validatedPaths,
+            logEntry: upsert.logEntry,
+            indexDeltas: upsert.indexDeltas,
+          };
         },
-        onItemDone: () => {
-          // Could yield progress here, but boundedFanout's onItemDone is
-          // sync and we're inside an async generator — buffer for the
-          // post-loop summary instead.
+        onItemError: ({ item, error }) => {
+          // Persist FSM state synchronously so it's right even if we crash
+          // before the result map. AbortError = soft deadline hit during an
+          // in-flight LLM call → roll back to 'pending' (next run will try
+          // again). Anything else = real failure → 'failed' with reason.
+          if (error.name === 'AbortError') {
+            store.markPending(item.id);
+          } else {
+            store.markFailed(item.id, error.message.slice(0, 200));
+          }
         },
+      });
+
+      // Map FanOutResult<ArticleResult>[] → ArticleResult[]. Successes pass
+      // through; collect errors become 'skipped' (deadline) or 'failed'
+      // (everything else), mirroring the markPending/markFailed split in
+      // onItemError so the in-memory result and the DB row agree.
+      const results: ArticleResult[] = fanoutResults.map((r, i) => {
+        if (r.ok) return r.value;
+        const article = batch[i]!;
+        if (r.error.name === 'AbortError') {
+          return {
+            articleId: article.id,
+            outcome: 'skipped',
+            reason: 'deadline-rolled-over',
+            pagePaths: [],
+            indexDeltas: [],
+          };
+        }
+        return {
+          articleId: article.id,
+          outcome: 'failed',
+          reason: r.error.message.slice(0, 200),
+          pagePaths: [],
+          indexDeltas: [],
+        };
       });
 
       ctx.results = results;
@@ -327,6 +369,7 @@ async function callTriage(
   client: OpenAI,
   model: string,
   article: ArticleRow,
+  signal: AbortSignal,
 ): Promise<TriageDecision> {
   const r = await runAgentWithTools(
     {
@@ -345,7 +388,11 @@ async function callTriage(
         content: `Title: ${article.title}\nField: ${article.field ?? '(none)'}\nURL: ${article.url ?? '(empty)'}\n${article.snippet ? `Snippet: ${article.snippet.slice(0, 400)}` : 'Snippet: (none)'}`,
       },
     ],
-    { client, toolExecutor: { execute: async () => ({ toolCallId: '', content: '' }) } },
+    {
+      client,
+      toolExecutor: { execute: async () => ({ toolCallId: '', content: '' }) },
+      signal,
+    },
   );
   return parseJSON<TriageDecision>(r.text, { keep: false, reason: 'parse-failed' });
 }
@@ -364,6 +411,7 @@ async function callUpsert(
   systemPrompt: string,
   article: ArticleRow,
   registry: ToolRegistry,
+  signal: AbortSignal,
 ): Promise<UpsertDecision> {
   const r = await runAgentWithTools(
     {
@@ -389,7 +437,7 @@ async function callUpsert(
           `Decide. If you write pages, return the structured JSON described in your instructions.`,
       },
     ],
-    { client, toolExecutor: registry, cache: undefined },
+    { client, toolExecutor: registry, cache: undefined, signal },
   );
   const fallback: UpsertDecision = { action: 'skipped', reason: 'parse-failed', paths: [], indexDeltas: [] };
   const parsed = parseJSON<Partial<UpsertDecision>>(r.text, fallback);

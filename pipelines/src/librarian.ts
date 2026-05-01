@@ -89,10 +89,20 @@ async function main(): Promise<void> {
     commitLocal(git),
   ];
 
+  // Wall-clock deadline as an AbortSignal: forwarded through processBatch
+  // into runAgentWithTools so in-flight LLM calls unwind on abort, instead
+  // of being checked once per runner invocation (the old deadlineAt
+  // approach, which couldn't interrupt a 60-90s upsert mid-call).
+  const deadlineController = new AbortController();
+  const deadlineTimer = setTimeout(
+    () => deadlineController.abort('deadline-reached'),
+    minutes * 60 * 1000,
+  );
+
   const ctx: LibrarianCtx = {
     cache: new PipelineCache(),
     batchSize,
-    deadlineAt: new Date(Date.now() + minutes * 60 * 1000),
+    signal: deadlineController.signal,
   };
 
   // acquireExclusive: refuse to start a second librarian if one is already
@@ -102,6 +112,7 @@ async function main(): Promise<void> {
   const jobId = jobStore.acquireExclusive('chiya-librarian', { batchSize, minutes });
   if (!jobId) {
     console.log('[librarian] another run is already in flight — exiting cleanly');
+    clearTimeout(deadlineTimer);
     store.close();
     jobStore.close();
     return;
@@ -110,11 +121,15 @@ async function main(): Promise<void> {
     console.log(`[event:${e.eventType}]`, JSON.stringify(e.data)),
   );
 
-  await runner.run(jobId, phases, ctx, () => ({
-    batchSize,
-    processed: ctx.results?.length ?? 0,
-    counts: store.countByStatus(),
-  }));
+  try {
+    await runner.run(jobId, phases, ctx, () => ({
+      batchSize,
+      processed: ctx.results?.length ?? 0,
+      counts: store.countByStatus(),
+    }));
+  } finally {
+    clearTimeout(deadlineTimer);
+  }
 
   const final = jobStore.getJob(jobId);
   console.log(`[librarian] job ${jobId} → ${final?.status}`);
