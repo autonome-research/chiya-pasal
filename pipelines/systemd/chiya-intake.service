@@ -8,6 +8,9 @@ Type=oneshot
 WorkingDirectory=%h/chiya-library/pipelines
 ExecStart=/usr/bin/env npx tsx src/intake.ts
 Environment=VAULT_DIR=%h/vault
+# Intake doesn't read CHIYA_EMAIL_TO, but loading the file keeps the env
+# surface consistent across pipeline units. Leading `-` makes it optional.
+EnvironmentFile=-%h/chiya-library/pipelines/.env
 StandardOutput=journal
 StandardError=journal
 TimeoutStartSec=600

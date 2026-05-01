@@ -7,6 +7,9 @@ Type=oneshot
 WorkingDirectory=%h/chiya-library/pipelines
 ExecStart=/usr/bin/env npx tsx src/digest.ts %i
 Environment=VAULT_DIR=%h/vault
+# Loads CHIYA_EMAIL_TO and any local overrides; leading `-` keeps the unit
+# valid on hosts that haven't set up the file yet.
+EnvironmentFile=-%h/chiya-library/pipelines/.env
 StandardOutput=journal
 StandardError=journal
 TimeoutStartSec=900

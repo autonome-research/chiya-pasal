@@ -42,11 +42,22 @@ export interface ChiyaEnv {
 }
 
 export function loadChiyaEnv(): ChiyaEnv {
+  // CHIYA_EMAIL_TO is the only required secret-ish var. Systemd loads it
+  // via EnvironmentFile=-%h/chiya-library/pipelines/.env (see service
+  // units); for local dev: `set -a && source .env && set +a` before
+  // running. .env.example documents the expected keys.
+  const emailTo = process.env.CHIYA_EMAIL_TO;
+  if (!emailTo) {
+    throw new Error(
+      'CHIYA_EMAIL_TO is required. Set it in pipelines/.env (gitignored) ' +
+        'or export it in your shell. See pipelines/.env.example.',
+    );
+  }
   return {
     vaultDir: resolve(process.env.VAULT_DIR ?? `${homedir()}/vault`),
     vaultRemote: process.env.VAULT_REMOTE ?? 'origin',
     vaultBranch: process.env.VAULT_BRANCH ?? 'main',
-    emailTo: process.env.CHIYA_EMAIL_TO ?? 'velvetmoon222999@gmail.com',
+    emailTo,
     fast: {
       baseUrl: process.env.FAST_INFERENCE_BASE_URL ?? 'http://localhost:11435/v1',
       apiKey: process.env.FAST_INFERENCE_API_KEY ?? 'not-needed',

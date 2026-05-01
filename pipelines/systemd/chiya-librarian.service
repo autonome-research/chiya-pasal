@@ -13,6 +13,9 @@ WorkingDirectory=%h/chiya-library/pipelines
 # timeout needs slack over the deadline for the tail.
 ExecStart=/usr/bin/env npx tsx src/librarian.ts --batch=10 --minutes=8
 Environment=VAULT_DIR=%h/vault
+# Loads CHIYA_EMAIL_TO and any local overrides; leading `-` keeps the unit
+# valid on hosts that haven't set up the file yet.
+EnvironmentFile=-%h/chiya-library/pipelines/.env
 StandardOutput=journal
 StandardError=journal
 # Headroom for the 26b upsert model: --minutes=8 deadline plus generous
