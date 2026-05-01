@@ -72,8 +72,16 @@ export class GitOps {
    * - fetch first to make sure we know the true remote tip
    * - if 0 unpushed: no-op (nothing to push)
    * - if 1 unpushed: just push (no squash needed)
-   * - if >1 unpushed: reset --soft to the remote tip, single commit with the
-   *   given message, then push
+   * - if >1 unpushed: verify remote tip is an ancestor of HEAD, reset --soft
+   *   to it, single commit with the given message, then push
+   *
+   * The ancestry check matters: if HEAD has diverged from remote (e.g. remote
+   * moved forward independently and we never merged), `git reset --soft
+   * <remote>` followed by recommit would silently revert remote-only changes
+   * — the soft reset moves HEAD to remote/branch but keeps the working tree
+   * at the old HEAD's content, so re-committing produces a tree that's
+   * missing whatever remote added. Bail out instead and let the caller
+   * surface the error.
    */
   async squashAndPush(messageBuilder: (count: number) => string): Promise<{
     pushed: boolean;
@@ -86,6 +94,15 @@ export class GitOps {
 
     if (count > 1) {
       const remoteRef = `${this.opts.remote}/${this.opts.branch}`;
+      try {
+        await this.run(['merge-base', '--is-ancestor', remoteRef, 'HEAD']);
+      } catch {
+        throw new Error(
+          `squashAndPush: ${remoteRef} is not an ancestor of HEAD — refusing to ` +
+            `soft-reset, since it would revert remote-only changes. Resolve the ` +
+            `divergence manually (rebase or merge) before re-running.`,
+        );
+      }
       await this.run(['reset', '--soft', remoteRef]);
       await this.run(['commit', '-m', messageBuilder(count)]);
     }
