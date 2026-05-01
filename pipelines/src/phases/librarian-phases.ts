@@ -189,28 +189,20 @@ export const processBatch =
       // mode: 'collect' lets the runner throw on backend errors (callUpsert
       // network failure, vault permission denied, etc.) and returns a
       // FanOutResult per article instead of rejecting the whole fanout.
-      // `signal` is captured by closure rather than passed into boundedFanout
-      // so the soft-deadline can stop new dispatches *and* unwind in-flight
-      // LLM calls without triggering boundedFanout's hard-cancel rejection
-      // at the post-loop signal check.
+      //
+      // `signal` is passed straight into boundedFanout — thread-phase 1.2.1's
+      // soft-cancel semantics give us exactly what we want: on deadline
+      // abort the fanout (a) stops dispatching new items, (b) forwards the
+      // signal into the runner so in-flight LLM calls unwind via
+      // runAgentWithTools({signal}), and (c) returns a position-stable
+      // FanOutResult<ArticleResult>[] with synthetic AbortError slots for
+      // never-started items — no rejection, partial results pass through.
       const fanoutResults = await boundedFanout({
         items: batch,
         concurrency,
         mode: 'collect' as const,
-        runner: async (article): Promise<ArticleResult> => {
-          // Deadline already fired before this article was dispatched. Roll
-          // it back to pending and return a soft-skip; no LLM call made.
-          if (ctx.signal.aborted) {
-            store.markPending(article.id);
-            return {
-              articleId: article.id,
-              outcome: 'skipped',
-              reason: 'deadline-rolled-over',
-              pagePaths: [],
-              indexDeltas: [],
-            };
-          }
-
+        signal: ctx.signal,
+        runner: async (article, _i, signal): Promise<ArticleResult> => {
           // Triage call. Signal forwarded into runAgentWithTools so an
           // in-flight stream gets aborted on deadline; that throws an
           // AbortError which the collect mode catches as a per-item error.
@@ -218,7 +210,7 @@ export const processBatch =
             clients.triageClient,
             clients.triageModel,
             article,
-            ctx.signal,
+            signal!,
           );
           if (!triage.keep) {
             store.markSkipped(article.id, triage.reason);
@@ -233,16 +225,16 @@ export const processBatch =
           }
 
           // Upsert call. Same signal threading. No try/catch around it —
-          // mode: 'collect' captures throws into onItemError + a
-          // {ok: false, error} result slot, which the post-loop maps to
-          // an outcome:'failed' (or 'skipped' for AbortError).
+          // mode: 'collect' captures throws into a {ok: false, error} slot,
+          // which the post-loop maps to outcome:'failed' (or 'skipped' for
+          // AbortError) and reconciles the FSM.
           const upsert = await callUpsert(
             clients.upsertClient,
             clients.upsertModel,
             upsertSystem,
             article,
             buildRegistry(),
-            ctx.signal,
+            signal!,
           );
           if (upsert.action === 'skipped') {
             store.markSkipped(article.id, upsert.reason);
@@ -304,27 +296,26 @@ export const processBatch =
             indexDeltas: upsert.indexDeltas,
           };
         },
-        onItemError: ({ item, error }) => {
-          // Persist FSM state synchronously so it's right even if we crash
-          // before the result map. AbortError = soft deadline hit during an
-          // in-flight LLM call → roll back to 'pending' (next run will try
-          // again). Anything else = real failure → 'failed' with reason.
-          if (error.name === 'AbortError') {
-            store.markPending(item.id);
-          } else {
-            store.markFailed(item.id, error.message.slice(0, 200));
-          }
-        },
       });
 
-      // Map FanOutResult<ArticleResult>[] → ArticleResult[]. Successes pass
-      // through; collect errors become 'skipped' (deadline) or 'failed'
-      // (everything else), mirroring the markPending/markFailed split in
-      // onItemError so the in-memory result and the DB row agree.
+      // Map FanOutResult<ArticleResult>[] → ArticleResult[] AND reconcile
+      // ArticleStore FSM for failure slots. Three cases:
+      //   - r.ok=true: runner already did markDone/markSkipped/markFailed
+      //     on its way to returning. Pass the value through.
+      //   - r.ok=false, AbortError: covers both an in-flight runner that
+      //     observed the forwarded signal and threw mid-LLM, AND
+      //     never-started slots that boundedFanout filled synthetically
+      //     after deadline (1.2.1 soft-cancel). markPending is idempotent
+      //     in either case — the row goes back into the queue for the
+      //     next run.
+      //   - r.ok=false, other error: real backend failure (network, vault
+      //     I/O, JSON parse). markFailed records the reason; the row is
+      //     reapable later if the underlying issue is transient.
       const results: ArticleResult[] = fanoutResults.map((r, i) => {
         if (r.ok) return r.value;
         const article = batch[i]!;
         if (r.error.name === 'AbortError') {
+          store.markPending(article.id);
           return {
             articleId: article.id,
             outcome: 'skipped',
@@ -333,6 +324,7 @@ export const processBatch =
             indexDeltas: [],
           };
         }
+        store.markFailed(article.id, r.error.message.slice(0, 200));
         return {
           articleId: article.id,
           outcome: 'failed',
