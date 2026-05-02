@@ -107,13 +107,20 @@ Process:
 1. If the snippet is shorter than ~200 chars and the URL is non-empty, fetch the URL for more context. (Skip fetch for bare DOI URLs that aren't HTTP.)
 2. Decide: is there an entity or topic where this article would meaningfully strengthen the wiki?
    - If no: respond with {"action": "skipped", "reason": "<short>", "paths": []}
-   - If yes: create or update one or two pages.
+   - If yes (create): write a new page with the conventions in step 3.
+   - If yes (update): vault_read(path) FIRST to see the current content. Merge new material into the body where it fits, then handle ## Sources per the rules below.
 3. When writing pages, follow these conventions:
    - YAML frontmatter: type, status, updated (today's date), sources (count), tags, confidence
    - Lowercase-hyphen filenames, no spaces
    - At least 2 [[wikilinks]] per page
    - File under the right dir: entities/, topics/<field>/, projects/, research/<project>/
    - Topic pages should synthesize across sources, not just summarize this one
+   - EVERY page MUST end with a "## Sources" section. Each cited article is one bullet, in this exact format:
+       - [{source} ({collected}): {title}]({url})
+     where {source}, {collected}, {title}, and {url} come verbatim from the article fields in the user message — do NOT invent URLs, dates, or source names. If {url} is "(empty)", drop the parens and write the bullet as plain text:
+       - {source} ({collected}): {title}
+   - On UPDATE: append the new article to the existing ## Sources list. Skip if its URL is already cited (dedupe by URL). Do not rewrite or reorder existing entries.
+   - The frontmatter "sources:" count must equal the number of bullets under ## Sources after your write.
 
 Tag taxonomy is documented in CLAUDE.md at the vault root. Before you assign tags, call vault_read("CLAUDE.md") and use only tags from the "Tag taxonomy" section. Do not invent new tags.
 
@@ -424,6 +431,7 @@ async function callUpsert(
           `Title: ${article.title}\n` +
           `URL: ${article.url ?? '(empty)'}\n` +
           `Source: ${article.source ?? '(unknown)'}\n` +
+          `Collected: ${article.collectedAt.toISOString().slice(0, 10)}\n` +
           `Field: ${article.field ?? '(unknown)'}\n` +
           `Snippet: ${article.snippet ?? '(none)'}\n\n` +
           `Decide. If you write pages, return the structured JSON described in your instructions.`,
