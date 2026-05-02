@@ -294,6 +294,33 @@ export const processBatch =
             };
           }
 
+          // Source-URL enforcement: the prompt requires every page to cite
+          // this article's URL in its ## Sources section. Same belt-and-
+          // suspenders pattern as ghost-paths — small models sometimes
+          // claim "I added the source" without actually writing the URL.
+          // Skip when the article had no URL to cite (bare DOI, RSS-only
+          // entries with empty url field).
+          if (article.url) {
+            const pagesWithoutUrl: string[] = [];
+            for (const p of validatedPaths) {
+              const text = await vault.read(p);
+              if (!text.includes(article.url)) {
+                pagesWithoutUrl.push(p);
+              }
+            }
+            if (pagesWithoutUrl.length > 0) {
+              const reason = `agent wrote pages without citing the source URL: ${pagesWithoutUrl.slice(0, 3).join(', ')}${pagesWithoutUrl.length > 3 ? '…' : ''}`;
+              store.markFailed(article.id, reason);
+              return {
+                articleId: article.id,
+                outcome: 'failed',
+                reason,
+                pagePaths: [],
+                indexDeltas: [],
+              };
+            }
+          }
+
           store.markDone(article.id, validatedPaths);
           return {
             articleId: article.id,
