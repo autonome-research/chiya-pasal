@@ -173,6 +173,26 @@ export class ArticleStore {
     return rows.map(toArticleRow);
   }
 
+  /**
+   * Every 'done' article whose page_paths JSON contains the given vault-relative
+   * path. Drives the source-URL backfill: walk the wiki, look up which articles
+   * informed each page, append a ## Sources section with their URLs.
+   *
+   * page_paths is a JSON array of strings; each element is wrapped in double
+   * quotes by JSON encoding, so a LIKE on the quoted form is a precise match
+   * (no false positives from substring overlap with other paths).
+   */
+  findByPagePath(path: string): ArticleRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM article
+         WHERE status = 'done' AND page_paths LIKE ?
+         ORDER BY collected_at ASC, id ASC`,
+      )
+      .all(`%"${path}"%`) as RawRow[];
+    return rows.map(toArticleRow);
+  }
+
   /** Articles collected on a given UTC date string (YYYY-MM-DD). For digest. */
   listByDate(dateUtc: string): ArticleRow[] {
     const rows = this.db

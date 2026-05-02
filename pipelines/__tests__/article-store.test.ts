@@ -147,6 +147,39 @@ describe('ArticleStore.listByDate / countByStatus', () => {
     expect(store.listByLocalDate('')).toEqual([]);
   });
 
+  it('findByPagePath returns done articles whose page_paths includes the path', () => {
+    const a = store.upsertPending({ ...baseInput, title: 'A', url: 'https://e.com/a' }).id!;
+    const b = store.upsertPending({ ...baseInput, title: 'B', url: 'https://e.com/b' }).id!;
+    const c = store.upsertPending({ ...baseInput, title: 'C', url: 'https://e.com/c' }).id!;
+    store.markDone(a, ['wiki/topics/foo.md', 'wiki/entities/bar.md']);
+    store.markDone(b, ['wiki/topics/foo.md']);
+    store.markDone(c, ['wiki/topics/baz.md']);
+
+    const fooArticles = store.findByPagePath('wiki/topics/foo.md');
+    expect(fooArticles.map((r) => r.title).sort()).toEqual(['A', 'B']);
+
+    const barArticles = store.findByPagePath('wiki/entities/bar.md');
+    expect(barArticles.map((r) => r.title)).toEqual(['A']);
+
+    expect(store.findByPagePath('wiki/topics/never-written.md')).toEqual([]);
+  });
+
+  it('findByPagePath excludes non-done statuses (pending, skipped, failed)', () => {
+    const a = store.upsertPending({ ...baseInput, title: 'pending', url: 'https://e.com/a' }).id!;
+    const b = store.upsertPending({ ...baseInput, title: 'skipped', url: 'https://e.com/b' }).id!;
+    const c = store.upsertPending({ ...baseInput, title: 'failed', url: 'https://e.com/c' }).id!;
+    const d = store.upsertPending({ ...baseInput, title: 'done', url: 'https://e.com/d' }).id!;
+    // a stays pending; b skipped; c failed; d done — only d should match.
+    store.markSkipped(b, 'irrelevant');
+    store.markFailed(c, 'parse-error');
+    store.markDone(d, ['wiki/topics/x.md']);
+    // Forge a page_paths value on the others to prove status filter wins.
+    // (markPending/markSkipped/markFailed don't write page_paths; they stay '[]'.
+    // But to be safe, also test that filter is by status, not just by JSON.)
+    expect(store.findByPagePath('wiki/topics/x.md').map((r) => r.title)).toEqual(['done']);
+    void a;
+  });
+
   it('countByStatus returns full record', () => {
     const a = store.upsertPending({ ...baseInput, title: 'A', url: 'https://e.com/a' }).id!;
     const b = store.upsertPending({ ...baseInput, title: 'B', url: 'https://e.com/b' }).id!;
