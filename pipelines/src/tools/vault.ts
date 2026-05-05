@@ -165,3 +165,139 @@ export function registerVaultTools(registry: ToolRegistry, vault: VaultFs): void
     async ({ path }) => String(await vault.exists(String(path))),
   );
 }
+
+// ---------------------------------------------------------------------------
+// Tracked variant — same surface, but vault_write captures pre-write state
+// per path so the caller can roll back partial writes if a post-call check
+// (URL-citation, ghost-paths, truncation) fails.
+//
+// Per-article use: build one tracker per upsert call (the registry is
+// already per-article in librarian-phases.ts processBatch), call
+// tracker.rollback() on validation failure, drop the tracker on success.
+// ---------------------------------------------------------------------------
+
+export interface WriteTracker {
+  /**
+   * Restore every page this article wrote to its pre-write state. New pages
+   * (no prior content) are unlinked. Concurrent-write guard: if the page's
+   * current contents differ from what we last wrote (i.e. another
+   * concurrent runner has touched it since), skip the rollback for that
+   * path — the other writer's work supersedes ours.
+   */
+  rollback(): Promise<{ restored: string[]; deleted: string[]; superseded: string[] }>;
+}
+
+interface WriteRecord {
+  before: string | null; // null = file did not exist before this article touched it
+  lastWrote: string; // what we most recently wrote, for the concurrent-write guard
+}
+
+export function registerVaultToolsTracked(
+  registry: ToolRegistry,
+  vault: VaultFs,
+): WriteTracker {
+  const writes = new Map<string, WriteRecord>();
+
+  // Read-side tools are unchanged.
+  registry.register(
+    {
+      name: 'vault_read',
+      description: 'Read a file from the vault. Path is relative to the vault root.',
+      inputSchema: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+    async ({ path }) => {
+      const content = await vault.readOptional(String(path));
+      return content ?? `[NOT FOUND: ${path}]`;
+    },
+  );
+
+  registry.register(
+    {
+      name: 'vault_write',
+      description:
+        'Write (or overwrite) a file in the vault. Creates parent directories as needed.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          content: { type: 'string' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+    async ({ path, content }) => {
+      const p = String(path);
+      const c = String(content);
+      // Snapshot before-state ONCE per path. Subsequent writes by the same
+      // agent update lastWrote but leave `before` at the original pre-runner
+      // state, so rollback unwinds the article's full effect on this path.
+      if (!writes.has(p)) {
+        const existed = await vault.exists(p);
+        writes.set(p, { before: existed ? await vault.read(p) : null, lastWrote: c });
+      } else {
+        writes.get(p)!.lastWrote = c;
+      }
+      await vault.write(p, c);
+      return `wrote ${p} (${c.length} chars)`;
+    },
+  );
+
+  registry.register(
+    {
+      name: 'vault_list',
+      description: 'List vault files matching a glob pattern. Returns one path per line.',
+      inputSchema: {
+        type: 'object',
+        properties: { pattern: { type: 'string' } },
+        required: ['pattern'],
+      },
+    },
+    async ({ pattern }) => {
+      const paths = await vault.list(String(pattern));
+      return paths.length ? paths.join('\n') : '(no matches)';
+    },
+  );
+
+  registry.register(
+    {
+      name: 'vault_exists',
+      description: 'Check if a vault path exists. Returns "true" or "false".',
+      inputSchema: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+    async ({ path }) => String(await vault.exists(String(path))),
+  );
+
+  return {
+    async rollback() {
+      const restored: string[] = [];
+      const deleted: string[] = [];
+      const superseded: string[] = [];
+      for (const [path, { before, lastWrote }] of writes) {
+        const exists = await vault.exists(path);
+        const current = exists ? await vault.read(path) : null;
+        if (current !== lastWrote) {
+          // Someone else has touched this path since we wrote it; their
+          // version supersedes our about-to-be-rolled-back state.
+          superseded.push(path);
+          continue;
+        }
+        if (before === null) {
+          await vault.unlink(path);
+          deleted.push(path);
+        } else {
+          await vault.write(path, before);
+          restored.push(path);
+        }
+      }
+      return { restored, deleted, superseded };
+    },
+  };
+}

@@ -23,7 +23,7 @@ import type OpenAI from 'openai';
 import { ArticleStore, type ArticleRow } from '../shared/article-store.js';
 import type { ArticleResult, LibrarianCtx } from '../shared/librarian-types.js';
 import { GitOps } from '../tools/git.js';
-import { VaultFs, registerVaultTools } from '../tools/vault.js';
+import { VaultFs, registerVaultToolsTracked, type WriteTracker } from '../tools/vault.js';
 import { registerWebTools } from '../tools/web.js';
 
 const STALE_PROCESSING_MINUTES = 60;
@@ -179,12 +179,15 @@ export const processBatch =
       const upsertSystem = UPSERT_SYSTEM_TEMPLATE(taste, index);
 
       // Each worker gets its own ToolRegistry so tool calls aren't cross-contaminated.
-      // (Stateless tools so the per-worker registry could be shared, but isolating is cheaper than reasoning about it.)
-      const buildRegistry = (): ToolRegistry => {
+      // The TRACKED vault tools snapshot pre-write state per path so we can
+      // roll back partial writes if post-call validation (ghost-paths,
+      // url-not-cited, truncation) fails. Returns both the registry and a
+      // tracker handle whose rollback() method restores the snapshots.
+      const buildRegistry = (): { registry: ToolRegistry; tracker: WriteTracker } => {
         const reg = new ToolRegistry();
-        registerVaultTools(reg, vault);
+        const tracker = registerVaultToolsTracked(reg, vault);
         registerWebTools(reg);
-        return reg;
+        return { registry: reg, tracker };
       };
 
       yield {
@@ -231,19 +234,34 @@ export const processBatch =
             };
           }
 
-          // Upsert call. Same signal threading. No try/catch around it —
-          // mode: 'collect' captures throws into a {ok: false, error} slot,
-          // which the post-loop maps to outcome:'failed' (or 'skipped' for
-          // AbortError) and reconciles the FSM.
-          const upsert = await callUpsert(
-            clients.upsertClient,
-            clients.upsertModel,
-            upsertSystem,
-            article,
-            buildRegistry(),
-            signal!,
-          );
+          // Upsert call. Tracked tools snapshot pre-write state per path
+          // so we can roll back any partial writes on failure (truncation,
+          // ghost-paths, url-not-cited). Top-level try/catch routes all
+          // throws through tracker.rollback() before re-throwing — keeps
+          // the partial-write window minimal even for unexpected errors.
+          // Structured validation failures call tracker.rollback() inline
+          // at each failure branch.
+          const { registry, tracker } = buildRegistry();
+          let upsert: UpsertDecision;
+          try {
+            upsert = await callUpsert(
+              clients.upsertClient,
+              clients.upsertModel,
+              upsertSystem,
+              article,
+              registry,
+              signal!,
+            );
+          } catch (err) {
+            await tracker.rollback();
+            throw err; // bubbles to mode='collect'; post-loop marks failed
+          }
+
           if (upsert.action === 'skipped') {
+            // Agent shouldn't have written anything when returning 'skipped',
+            // but if it did, those writes are stray. rollback is a no-op on
+            // a clean tracker.
+            await tracker.rollback();
             store.markSkipped(article.id, upsert.reason);
             return {
               articleId: article.id,
@@ -270,6 +288,7 @@ export const processBatch =
             }
           }
           if (ghostPaths.length > 0) {
+            await tracker.rollback();
             const reason = `agent claimed paths that don't exist: ${ghostPaths.slice(0, 3).join(', ')}${ghostPaths.length > 3 ? '…' : ''}`;
             store.markFailed(article.id, reason);
             return {
@@ -283,6 +302,7 @@ export const processBatch =
             };
           }
           if (validatedPaths.length === 0) {
+            await tracker.rollback();
             const reason = `action='${upsert.action}' but paths[] empty`;
             store.markFailed(article.id, reason);
             return {
@@ -309,6 +329,7 @@ export const processBatch =
               }
             }
             if (pagesWithoutUrl.length > 0) {
+              await tracker.rollback();
               const reason = `agent wrote pages without citing the source URL: ${pagesWithoutUrl.slice(0, 3).join(', ')}${pagesWithoutUrl.length > 3 ? '…' : ''}`;
               store.markFailed(article.id, reason);
               return {
