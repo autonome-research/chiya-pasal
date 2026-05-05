@@ -119,7 +119,7 @@ Process:
        - [{source} ({collected}): {title}]({url})
      where {source}, {collected}, {title}, and {url} come verbatim from the article fields in the user message — do NOT invent URLs, dates, or source names. If {url} is "(empty)", drop the parens and write the bullet as plain text:
        - {source} ({collected}): {title}
-   - On UPDATE: append the new article to the existing ## Sources list. Skip if its URL is already cited (dedupe by URL). Do not rewrite or reorder existing entries.
+   - On UPDATE: ALWAYS add a new bullet for THE CURRENT ARTICLE'S URL (from the user message above) to the existing ## Sources list. The fact that the page already has bullets from prior articles does NOT satisfy this — those are different articles' URLs. The only time to skip the new bullet is if THIS article's exact URL already appears in the list. Do not rewrite or reorder existing bullets.
    - The frontmatter "sources:" count must equal the number of bullets under ## Sources after your write.
 
 Tag taxonomy is documented in CLAUDE.md at the vault root. Before you assign tags, call vault_read("CLAUDE.md") and use only tags from the "Tag taxonomy" section. Do not invent new tags.
