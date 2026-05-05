@@ -466,6 +466,19 @@ async function callUpsert(
     ],
     { client, toolExecutor: registry, cache: undefined, signal },
   );
+  // Truncation detection: when the model hits maxTokens before finishing its
+  // structured output, finishReason is 'length' and the JSON it claims to
+  // have written is partial/parseable-but-wrong. Worse, by the time we get
+  // here the agent has typically already vault_write'd one or more pages
+  // mid-thought. Throw so processBatch's mode='collect' captures it as a
+  // per-item failure (and, paired with the rollback tracker, undoes any
+  // partial writes the truncated agent landed on disk).
+  if (r.finishReason === 'length') {
+    throw new Error(
+      `upsert truncated: model hit maxTokens=4000 before finishing. Pages ` +
+        `the agent wrote during this call may be incomplete; see rollback.`,
+    );
+  }
   const fallback: UpsertDecision = { action: 'skipped', reason: 'parse-failed', paths: [], indexDeltas: [] };
   const parsed = parseJSON<Partial<UpsertDecision>>(r.text, fallback);
   return {
