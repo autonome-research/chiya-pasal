@@ -89,6 +89,37 @@ export class VaultFs {
     return out;
   }
 
+  /**
+   * Grep-style search across files matching `pattern` (glob). For each line
+   * containing `keyword` (case-insensitive substring), return one match.
+   * Caps total matches at `limit` so an agent's tool call doesn't dump the
+   * whole vault on a popular keyword.
+   *
+   * Used by the v3 librarian's scouts to discover candidate pages by keyword
+   * before deciding which to vault_read in full.
+   */
+  async searchByKeyword(
+    pattern: string,
+    keyword: string,
+    limit: number = 50,
+  ): Promise<Array<{ path: string; line: number; context: string }>> {
+    const needle = keyword.toLowerCase();
+    if (needle.length === 0) return [];
+    const paths = await this.list(pattern);
+    const out: Array<{ path: string; line: number; context: string }> = [];
+    for (const p of paths) {
+      const text = await this.read(p);
+      const lines = text.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i]!.toLowerCase().includes(needle)) {
+          out.push({ path: p, line: i + 1, context: lines[i]!.slice(0, 200) });
+          if (out.length >= limit) return out;
+        }
+      }
+    }
+    return out;
+  }
+
   get rootDir(): string {
     return this.root;
   }
@@ -163,6 +194,106 @@ export function registerVaultTools(registry: ToolRegistry, vault: VaultFs): void
       },
     },
     async ({ path }) => String(await vault.exists(String(path))),
+  );
+
+  registry.register(
+    {
+      name: 'vault_search_by_keyword',
+      description:
+        'Grep for `keyword` (case-insensitive substring) across vault files matching `pattern`. ' +
+        'Returns up to 50 matches in `path:line: context` form, one per line. ' +
+        'Use to discover candidate pages for a topic before deciding which to vault_read in full.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'Glob, e.g. "wiki/topics/**/*.md"' },
+          keyword: { type: 'string' },
+        },
+        required: ['pattern', 'keyword'],
+      },
+    },
+    async ({ pattern, keyword }) => {
+      const hits = await vault.searchByKeyword(String(pattern), String(keyword));
+      if (hits.length === 0) return '(no matches)';
+      return hits.map((h) => `${h.path}:${h.line}: ${h.context}`).join('\n');
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Read-only subset — used by the v3 librarian's exploration scouts (topic /
+// source / entity / cite). They surface candidate pages for the reviewer; they
+// must not mutate the vault. Keep these registrations in lockstep with the
+// read tools in registerVaultTools above.
+// ---------------------------------------------------------------------------
+
+export function registerReadOnlyVaultTools(registry: ToolRegistry, vault: VaultFs): void {
+  registry.register(
+    {
+      name: 'vault_read',
+      description: 'Read a file from the vault. Path is relative to the vault root.',
+      inputSchema: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+    async ({ path }) => {
+      const content = await vault.readOptional(String(path));
+      return content ?? `[NOT FOUND: ${path}]`;
+    },
+  );
+
+  registry.register(
+    {
+      name: 'vault_list',
+      description: 'List vault files matching a glob pattern. Returns one path per line.',
+      inputSchema: {
+        type: 'object',
+        properties: { pattern: { type: 'string' } },
+        required: ['pattern'],
+      },
+    },
+    async ({ pattern }) => {
+      const paths = await vault.list(String(pattern));
+      return paths.length ? paths.join('\n') : '(no matches)';
+    },
+  );
+
+  registry.register(
+    {
+      name: 'vault_exists',
+      description: 'Check if a vault path exists. Returns "true" or "false".',
+      inputSchema: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+    async ({ path }) => String(await vault.exists(String(path))),
+  );
+
+  registry.register(
+    {
+      name: 'vault_search_by_keyword',
+      description:
+        'Grep for `keyword` (case-insensitive substring) across vault files matching `pattern`. ' +
+        'Returns up to 50 matches in `path:line: context` form, one per line. ' +
+        'Use to discover candidate pages for a topic before deciding which to vault_read in full.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'Glob, e.g. "wiki/topics/**/*.md"' },
+          keyword: { type: 'string' },
+        },
+        required: ['pattern', 'keyword'],
+      },
+    },
+    async ({ pattern, keyword }) => {
+      const hits = await vault.searchByKeyword(String(pattern), String(keyword));
+      if (hits.length === 0) return '(no matches)';
+      return hits.map((h) => `${h.path}:${h.line}: ${h.context}`).join('\n');
+    },
   );
 }
 
@@ -273,6 +404,28 @@ export function registerVaultToolsTracked(
       },
     },
     async ({ path }) => String(await vault.exists(String(path))),
+  );
+
+  registry.register(
+    {
+      name: 'vault_search_by_keyword',
+      description:
+        'Grep for `keyword` (case-insensitive substring) across vault files matching `pattern`. ' +
+        'Returns up to 50 matches in `path:line: context` form, one per line.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string' },
+          keyword: { type: 'string' },
+        },
+        required: ['pattern', 'keyword'],
+      },
+    },
+    async ({ pattern, keyword }) => {
+      const hits = await vault.searchByKeyword(String(pattern), String(keyword));
+      if (hits.length === 0) return '(no matches)';
+      return hits.map((h) => `${h.path}:${h.line}: ${h.context}`).join('\n');
+    },
   );
 
   return {
