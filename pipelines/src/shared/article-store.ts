@@ -193,6 +193,92 @@ export class ArticleStore {
     return rows.map(toArticleRow);
   }
 
+  /**
+   * Look up the article whose URL is the canonical arxiv abs page for `arxivId`.
+   * Version-agnostic: input '2605.03823v2' matches a row stored as
+   * '.../abs/2605.03823' or '.../abs/2605.03823v1'. Old-style ids like
+   * 'cs.AI/0501001' also work.
+   */
+  findByArxivId(arxivId: string): ArticleRow | null {
+    const bare = arxivId.trim().replace(/v\d+$/i, '');
+    if (!bare) return null;
+    // Anchor to '/abs/{id}' followed by end-of-string, version suffix, query,
+    // or fragment. Avoids matching '/abs/2605.038234' when looking up
+    // '/abs/2605.03823'.
+    const needle = `/abs/${bare}`;
+    const row = this.db
+      .prepare(
+        `SELECT * FROM article
+         WHERE url LIKE ? OR url LIKE ? OR url LIKE ? OR url LIKE ?
+         ORDER BY id ASC LIMIT 1`,
+      )
+      .get(
+        `%${needle}`,
+        `%${needle}v%`,
+        `%${needle}?%`,
+        `%${needle}#%`,
+      ) as RawRow | undefined;
+    return row ? toArticleRow(row) : null;
+  }
+
+  /**
+   * Look up by DOI. Accepts raw '10.1038/s41586-024-12345-6' or doi.org URL form.
+   * Lookup is case-insensitive (DOIs are per RFC 3986).
+   */
+  findByDoi(doi: string): ArticleRow | null {
+    const bare = doi
+      .trim()
+      .replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '')
+      .toLowerCase();
+    if (!bare) return null;
+    const row = this.db
+      .prepare(
+        `SELECT * FROM article
+         WHERE LOWER(url) LIKE ?
+         ORDER BY id ASC LIMIT 1`,
+      )
+      .get(`%doi.org/${bare}%`) as RawRow | undefined;
+    return row ? toArticleRow(row) : null;
+  }
+
+  /**
+   * Direct lookup by the existing url_hash column (sha256 of normalized URL).
+   */
+  findByUrlHash(urlHash: string): ArticleRow | null {
+    const row = this.db
+      .prepare(`SELECT * FROM article WHERE url_hash = ?`)
+      .get(urlHash) as RawRow | undefined;
+    return row ? toArticleRow(row) : null;
+  }
+
+  /**
+   * Keyword search across article titles. Each whitespace-separated keyword
+   * becomes its own LIKE clause AND'd together. Case-insensitive (titles
+   * stored as-is, LIKE is case-insensitive in sqlite default).
+   *
+   * Used by the v3 librarian's source-scout to surface sibling source pages
+   * the article being indexed should be linked to.
+   */
+  searchByTitle(keywords: string, limit: number = 10): ArticleRow[] {
+    const terms = keywords
+      .trim()
+      .split(/\s+/)
+      .filter((t) => t.length >= 2);
+    if (terms.length === 0) return [];
+    // ESCAPE applies per-LIKE in sqlite; clauses must each carry the escape char.
+    const where = terms.map(() => "title LIKE ? ESCAPE '\\'").join(' AND ');
+    const params = terms.map((t) => `%${t.replace(/[%_\\]/g, (c) => `\\${c}`)}%`);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM article
+         WHERE ${where}
+         ORDER BY collected_at DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(...params, limit) as RawRow[];
+    return rows.map(toArticleRow);
+  }
+
   /** Articles collected on a given UTC date string (YYYY-MM-DD). For digest. */
   listByDate(dateUtc: string): ArticleRow[] {
     const rows = this.db

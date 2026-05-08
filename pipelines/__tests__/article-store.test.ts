@@ -191,3 +191,162 @@ describe('ArticleStore.listByDate / countByStatus', () => {
     expect(counts.pending).toBe(0);
   });
 });
+
+describe('ArticleStore.findByArxivId / findByDoi / findByUrlHash', () => {
+  // upsertPending normalizes URLs (collapsing arxiv version suffixes and
+  // canonicalizing doi.org), so to set up rows whose stored `url` differs
+  // from the normalized form we write directly via the underlying handle.
+  function rawInsert(url: string, title: string): number {
+    const db = (store as unknown as {
+      db: { prepare: (q: string) => { run: (...a: unknown[]) => { lastInsertRowid: number | bigint } } };
+    }).db;
+    const result = db
+      .prepare(
+        `INSERT INTO article (url, url_hash, title, title_hash, collected_from)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(url, `hash:${url}`, title, `th:${title}`, baseInput.collectedFrom);
+    return Number(result.lastInsertRowid);
+  }
+
+  describe('findByArxivId', () => {
+    it('matches a row stored without a version suffix', () => {
+      rawInsert('https://arxiv.org/abs/2605.03823', 'A');
+      const row = store.findByArxivId('2605.03823');
+      expect(row?.title).toBe('A');
+    });
+
+    it('matches a row stored with a version suffix', () => {
+      rawInsert('https://arxiv.org/abs/2605.03823v1', 'B');
+      const row = store.findByArxivId('2605.03823');
+      expect(row?.title).toBe('B');
+    });
+
+    it('strips version suffix from input before matching', () => {
+      rawInsert('https://arxiv.org/abs/2605.03823', 'C');
+      const row = store.findByArxivId('2605.03823v2');
+      expect(row?.title).toBe('C');
+    });
+
+    it('does not match a different paper id whose prefix overlaps', () => {
+      rawInsert('https://arxiv.org/abs/2605.038234', 'longer');
+      const row = store.findByArxivId('2605.03823');
+      expect(row).toBeNull();
+    });
+
+    it('matches old-style ids with a category prefix', () => {
+      rawInsert('https://arxiv.org/abs/cs.AI/0501001', 'old');
+      const row = store.findByArxivId('cs.AI/0501001');
+      expect(row?.title).toBe('old');
+    });
+
+    it('returns null when no row matches', () => {
+      expect(store.findByArxivId('9999.99999')).toBeNull();
+    });
+  });
+
+  describe('findByDoi', () => {
+    const doi = '10.1038/s41586-024-12345-6';
+
+    it('matches a row stored as https://doi.org/{doi}', () => {
+      rawInsert(`https://doi.org/${doi}`, 'D');
+      expect(store.findByDoi(doi)?.title).toBe('D');
+    });
+
+    it('accepts a doi.org URL as input', () => {
+      rawInsert(`https://doi.org/${doi}`, 'E');
+      expect(store.findByDoi(`https://doi.org/${doi}`)?.title).toBe('E');
+    });
+
+    it('is case-insensitive: uppercase input matches lowercase row', () => {
+      rawInsert(`https://doi.org/${doi}`, 'F');
+      expect(store.findByDoi('10.1038/S41586-024-12345-6')?.title).toBe('F');
+    });
+
+    it('is case-insensitive: lowercase input matches uppercase row', () => {
+      rawInsert('https://doi.org/10.1038/S41586-024-12345-6', 'G');
+      expect(store.findByDoi(doi)?.title).toBe('G');
+    });
+
+    it('matches a dx.doi.org row from either input form', () => {
+      rawInsert(`https://dx.doi.org/${doi}`, 'H');
+      expect(store.findByDoi(doi)?.title).toBe('H');
+      expect(store.findByDoi(`https://dx.doi.org/${doi}`)?.title).toBe('H');
+      expect(store.findByDoi(`https://doi.org/${doi}`)?.title).toBe('H');
+    });
+
+    it('returns null when no row matches', () => {
+      expect(store.findByDoi('10.9999/missing')).toBeNull();
+    });
+  });
+
+  describe('findByUrlHash', () => {
+    it('returns the row for an exact url_hash match', () => {
+      const id = store.upsertPending({ ...baseInput, title: 'I', url: 'https://example.com/i' }).id!;
+      const fetched = store.getById(id)!;
+      const row = store.findByUrlHash(fetched.urlHash!);
+      expect(row?.id).toBe(id);
+    });
+
+    it('returns null on no match', () => {
+      expect(store.findByUrlHash('0'.repeat(64))).toBeNull();
+    });
+  });
+});
+
+describe('ArticleStore.searchByTitle', () => {
+  beforeEach(() => {
+    store.upsertPending({ ...baseInput, title: 'Quantum Error Correction with Surface Codes', url: 'https://e.com/qec' });
+    store.upsertPending({ ...baseInput, title: 'Surface code thresholds in noisy qubits', url: 'https://e.com/sct' });
+    store.upsertPending({ ...baseInput, title: 'Multi-Agent Reinforcement Learning Survey', url: 'https://e.com/marl' });
+    store.upsertPending({ ...baseInput, title: 'Reinforcement Learning from Human Feedback', url: 'https://e.com/rlhf' });
+    store.upsertPending({ ...baseInput, title: 'Transformer Architectures for NLP', url: 'https://e.com/tx' });
+  });
+
+  it('returns rows whose title matches every keyword (AND semantics)', () => {
+    const rows = store.searchByTitle('reinforcement learning');
+    const titles = rows.map((r) => r.title).sort();
+    expect(titles).toEqual([
+      'Multi-Agent Reinforcement Learning Survey',
+      'Reinforcement Learning from Human Feedback',
+    ]);
+  });
+
+  it('case-insensitive', () => {
+    const lower = store.searchByTitle('quantum surface');
+    const upper = store.searchByTitle('QUANTUM SURFACE');
+    expect(lower.map((r) => r.id)).toEqual(upper.map((r) => r.id));
+    expect(lower).toHaveLength(1);
+    expect(lower[0]!.title).toContain('Quantum Error Correction');
+  });
+
+  it('returns top-N by collected_at desc', () => {
+    const rows = store.searchByTitle('surface', 1);
+    expect(rows).toHaveLength(1);
+    // 'Surface code thresholds…' was inserted second, so newer collected_at than 'Quantum Error Correction…'
+    expect(rows[0]!.title).toBe('Surface code thresholds in noisy qubits');
+  });
+
+  it('returns empty for short or empty input', () => {
+    expect(store.searchByTitle('')).toEqual([]);
+    expect(store.searchByTitle('   ')).toEqual([]);
+    // Single-char terms get filtered out (length < 2 floor to avoid useless LIKE).
+    expect(store.searchByTitle('a')).toEqual([]);
+  });
+
+  it('escapes %, _, and \\ in keywords', () => {
+    store.upsertPending({ ...baseInput, title: '50% accuracy on token_level test', url: 'https://e.com/escapes' });
+    // The literal '%' should not be a wildcard.
+    const rows = store.searchByTitle('50%');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.title).toContain('50% accuracy');
+    // The literal '_' should not match arbitrary single characters.
+    const tokenLevel = store.searchByTitle('token_level');
+    expect(tokenLevel).toHaveLength(1);
+  });
+
+  it('returns empty when no row matches the AND of all keywords', () => {
+    expect(store.searchByTitle('reinforcement quantum')).toEqual([]);
+  });
+});
+
