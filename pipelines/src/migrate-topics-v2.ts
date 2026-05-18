@@ -505,8 +505,20 @@ async function main(): Promise<void> {
     renameMap.set(stripMd(p.oldPath), stripMd(p.newPath));
   }
 
-  // Move files first (git mv preserves history). For winners that stay in
-  // place, no move needed — we just overwrite.
+  // Order matters here. Some losers' oldPaths already sit at the flat
+  // wiki/topics/<slug>.md location that a winner is about to move INTO
+  // (e.g. winner=wiki/topics/cybersecurity/iot-security.md,
+  // loser=wiki/topics/iot-security.md). If we mv the winner first, git mv -f
+  // overwrites the loser file with the winner's content — and the subsequent
+  // git rm of the loser's oldPath then deletes the winner we just placed.
+  // Removing losers FIRST avoids that race: the path is clear before any
+  // winner moves into it.
+  for (const l of losers) {
+    await runGit(env.vaultDir, ['rm', '-f', l.oldPath]);
+  }
+
+  // Move files (git mv preserves history). For winners that stay in place,
+  // no move needed — we just overwrite their content below.
   for (const p of winners) {
     if (p.oldPath === p.newPath) continue;
     // git mv into a deeper-or-shallower path requires the parent dir to exist.
@@ -518,13 +530,6 @@ async function main(): Promise<void> {
   // loser data carry the merged member-lists + cluster unions here.
   for (const p of winners) {
     await vault.write(p.newPath, p.newContent);
-  }
-
-  // Remove loser files — their content (members, definition, clusters) is now
-  // folded into the winner at the same newPath, so the loser file is
-  // strictly redundant. git rm so the commit cleanly removes them.
-  for (const l of losers) {
-    await runGit(env.vaultDir, ['rm', '-f', l.oldPath]);
   }
 
   // Rewrite wikilinks across the entire wiki/.
