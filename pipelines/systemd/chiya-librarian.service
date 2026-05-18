@@ -1,24 +1,23 @@
 [Unit]
-Description=Chiya librarian — drain pending articles from the queue
+Description=Chiya librarian (v3) — drain pending articles via agentic exploration
 Documentation=https://github.com/Code4me2/chiya-library
 After=network-online.target
 
 [Service]
 Type=oneshot
 WorkingDirectory=%h/chiya-library/pipelines
-# --batch=20 keeps the predictable 4-conc × ~60s/upsert × 80%-keep wall
-# time well under --minutes=6. Smaller-than-it-looks-necessary because
-# in-flight LLM calls aren't cancellable yet (see thread-phase ROADMAP);
-# in-flight articles must finish before the run exits, so the systemd
-# timeout needs slack over the deadline for the tail.
-ExecStart=/usr/bin/env npx tsx src/librarian.ts --batch=10 --minutes=8
+# v3 pipeline: per-article router → 4 parallel scouts → reviewer → deterministic
+# write. Outer batch concurrency=4, per-article wall ~50-85s under load (7 LLM
+# calls per article). batch=10 + minutes=8 lands ~4-5 min, comfortably under
+# the 10-min timer cadence.
+ExecStart=/usr/bin/env npx tsx src/librarian-v2.ts --batch=10 --minutes=8
 Environment=VAULT_DIR=%h/vault
 # Loads CHIYA_EMAIL_TO and any local overrides; leading `-` keeps the unit
 # valid on hosts that haven't set up the file yet.
 EnvironmentFile=-%h/chiya-library/pipelines/.env
 StandardOutput=journal
 StandardError=journal
-# Headroom for the 26b upsert model: --minutes=8 deadline plus generous
-# slack for 4 in-flight articles to finish (each upsert can run 60-90s on
-# 26b vs ~20s on e4b). Smaller batch (10) reduces in-flight tail.
+# Headroom for the 26b tools-tier model used by scouts + reviewer. 8-min
+# in-pipeline deadline + slack for 4 in-flight articles to finish their
+# remaining LLM calls before the runner exits.
 TimeoutStartSec=1200
