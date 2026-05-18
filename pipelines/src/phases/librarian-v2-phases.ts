@@ -19,6 +19,7 @@ import {
 } from 'thread-phase';
 import { boundedFanout } from 'thread-phase/patterns';
 import type OpenAI from 'openai';
+import { setMaxListeners } from 'events';
 import { basename } from 'path';
 
 import { ArticleStore } from '../shared/article-store.js';
@@ -398,7 +399,7 @@ export const perArticleTree =
         concurrency: PER_ARTICLE_CONCURRENCY,
         mode: 'collect' as const,
         signal: ctx.signal,
-        runner: async (article, _idx, signal): Promise<ArticleResultV2> => {
+        runner: async (article, _idx, parentSignal): Promise<ArticleResultV2> => {
           // 1. Idempotency.
           const sid = stableIdForUrl(article.url ?? '');
           if (!sid) {
@@ -423,6 +424,38 @@ export const perArticleTree =
               backlinkPagePaths: [],
             };
           }
+
+          // Per-article child AbortController. Two purposes:
+          //   - Scope cleanup: the child is GC'd when the runner returns,
+          //     so any listeners the SDK attached to the child signal
+          //     (one per fetch + retries inside each runAgentWithTools
+          //     sub-call) go with it. ctx.signal accumulates only the
+          //     parent listener registered below — at most one per
+          //     concurrent runner, well under the default cap.
+          //   - Listener-cap suppression: each runner has 7 LLM sub-
+          //     calls (router + 4 scouts + reviewer + summary), each of
+          //     which can register multiple listeners on its signal as
+          //     it iterates tool rounds. The cumulative count per
+          //     CHILD signal can exceed Node's default 10-listener cap
+          //     during the runner's lifetime — not an actual leak, just
+          //     transient. Bumping the child's cap silences the
+          //     spurious warning without raising it on ctx.signal.
+          const childCtrl = new AbortController();
+          setMaxListeners(50, childCtrl.signal);
+          const onParentAbort = (): void => {
+            childCtrl.abort(parentSignal?.reason);
+          };
+          if (parentSignal?.aborted) {
+            childCtrl.abort(parentSignal.reason);
+          } else if (parentSignal) {
+            parentSignal.addEventListener('abort', onParentAbort, { once: true });
+          }
+          const signal = childCtrl.signal;
+          const releaseParentListener = (): void => {
+            if (parentSignal && !parentSignal.aborted) {
+              parentSignal.removeEventListener('abort', onParentAbort);
+            }
+          };
 
           const body = enrichedById.get(article.id)?.body ?? article.snippet ?? '';
           const articleRefs = refsById.get(article.id) ?? {
@@ -609,6 +642,8 @@ export const perArticleTree =
             // boundedFanout's collect mode.
             await writer.rollback();
             throw err;
+          } finally {
+            releaseParentListener();
           }
         },
       });
