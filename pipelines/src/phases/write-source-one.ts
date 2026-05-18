@@ -82,7 +82,13 @@ export async function callSummary(
       model: clients.model,
       tools: [],
       maxToolRounds: 1,
-      maxTokens: 1000,
+      // Effectively no cap. A well-behaved summary is 400-800 tokens; even
+      // an overlong one rarely exceeds 1500. Setting this past the model's
+      // own context-window (~8K for the fast tier) means only genuine
+      // runaway output trips the truncation backstop below, not normal
+      // length variation. Local Ollama tokens are free; latency at 8K is
+      // bounded by content, not the cap.
+      maxTokens: 8000,
     },
     [
       {
@@ -101,12 +107,13 @@ export async function callSummary(
       signal,
     },
   );
-  // Truncation detection: same pattern as callUpsert in librarian-phases.ts.
-  // A 'length' finishReason means the model ran out of budget mid-summary;
-  // throwing routes it to the fan-out's collect mode as a failed slot.
+  // Truncation backstop: with maxTokens unset, the only way finishReason
+  // can land as 'length' is the model hitting its own context window. That
+  // would mean a genuinely runaway summary; fail the article rather than
+  // index a cut-off page.
   if (r.finishReason === 'length') {
     throw new Error(
-      `write-source summary truncated: model hit maxTokens=1000 before finishing.`,
+      `write-source summary truncated: model exhausted its context window before finishing.`,
     );
   }
   return r.text.trim();
