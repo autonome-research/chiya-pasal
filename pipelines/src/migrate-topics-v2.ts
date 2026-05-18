@@ -16,8 +16,14 @@
  *   1. Parse existing content; extract definition (first paragraph after H1
  *      and before any `## ` heading).
  *   2. Compute the new flat path (basename without `.md` is the slug).
- *   3. Detect collisions; resolve by (a) larger member count wins,
- *      (b) lexicographic oldPath as tiebreaker. Losers are not migrated.
+ *      Intermediate directory parts (e.g. `physics/` from
+ *      `wiki/topics/physics/foo.md`) are lifted into a `clusters: [...]`
+ *      frontmatter field — soft domain metadata, not a rigid taxonomy.
+ *   3. Detect collisions; pick the winner by larger member count (lex
+ *      tiebreak), then FOLD loser data into the winner: union clusters,
+ *      union member lists, fall back to a non-empty loser definition if the
+ *      winner's is empty. Loser files are removed with `git rm` in apply mode
+ *      since their content is now redundant.
  *   4. Look up contributing articles via ArticleStore.findByPagePath.
  *      Each becomes a member entry keyed by stable-id filename.
  *   5. Render with formatTopicPage.
@@ -109,6 +115,28 @@ export function flattenTopicPath(oldPath: string): string {
   if (!normalized.startsWith(prefix)) return oldPath;
   const base = posix.basename(normalized);
   return `${prefix}${base}`;
+}
+
+/**
+ * Lift the intermediate directory parts of a `wiki/topics/<cluster>/.../foo.md`
+ * path into a list of cluster slugs. The legacy structure used these dirs as
+ * coarse domains (`physics/`, `ai-ml/`, etc.); the flat structure preserves
+ * them as soft `clusters: [...]` metadata so retrieval/browsing keeps working
+ * without rigidifying the taxonomy at the filesystem layer.
+ *
+ * - `wiki/topics/physics/quantum-sensing.md` → `['physics']`
+ * - `wiki/topics/biology/digital-twin/foo.md` → `['biology', 'digital-twin']`
+ * - `wiki/topics/quantum-sensing.md` → `[]` (already flat; no cluster signal)
+ * - Paths outside `wiki/topics/` → `[]`
+ */
+export function clustersFromOldPath(oldPath: string): string[] {
+  const normalized = oldPath.replace(/\\/g, '/');
+  const prefix = 'wiki/topics/';
+  if (!normalized.startsWith(prefix)) return [];
+  const after = normalized.slice(prefix.length);
+  const parts = after.split('/');
+  if (parts.length <= 1) return [];
+  return parts.slice(0, -1);
 }
 
 export function topicSlugFromPath(path: string): string {
@@ -209,7 +237,89 @@ interface PagePlan {
   memberCount: number;
   skippedNoUrl: number;
   created: Date;
+  clusters: string[];
   newContent: string;
+}
+
+/**
+ * Fold the data from collision losers into a single winning plan: union
+ * clusters, union member lists (dedupe by filename), and prefer the winner's
+ * definition unless empty (then fall back to the longest non-empty loser).
+ * The returned plan's `newContent` is re-rendered from the merged inputs.
+ *
+ * Exported for tests. `today` is the rendered `updated:` date — passed in
+ * rather than read so unit tests can assert deterministic output.
+ */
+export function foldLosersIntoWinner(
+  winner: PagePlan,
+  losers: PagePlan[],
+  today: Date,
+): PagePlan {
+  // Cluster union, order-preserving (winner first, then losers' uniques).
+  const seenClusters = new Set<string>();
+  const clusters: string[] = [];
+  for (const c of winner.clusters) {
+    if (!seenClusters.has(c)) {
+      seenClusters.add(c);
+      clusters.push(c);
+    }
+  }
+  for (const l of losers) {
+    for (const c of l.clusters) {
+      if (!seenClusters.has(c)) {
+        seenClusters.add(c);
+        clusters.push(c);
+      }
+    }
+  }
+
+  // Member union by filename. Winner's entry wins on collision; otherwise
+  // first-seen-from-losers wins.
+  const memberMap = new Map<string, PagePlan['members'][0]>();
+  for (const m of winner.members) memberMap.set(m.filename, m);
+  for (const l of losers) {
+    for (const m of l.members) {
+      if (!memberMap.has(m.filename)) memberMap.set(m.filename, m);
+    }
+  }
+  const members = [...memberMap.values()];
+
+  // Definition: winner's if non-empty, otherwise longest non-empty from losers.
+  let definition = winner.definition;
+  let definitionStatus = winner.definitionStatus;
+  if (definition.length === 0) {
+    const candidates = losers
+      .filter((l) => l.definition.length > 0)
+      .sort((a, b) => b.definition.length - a.definition.length);
+    if (candidates.length > 0) {
+      definition = candidates[0]!.definition;
+      definitionStatus = 'extracted';
+    }
+  }
+
+  const skippedNoUrl =
+    winner.skippedNoUrl + losers.reduce((sum, l) => sum + l.skippedNoUrl, 0);
+
+  const input: TopicPageInput = {
+    slug: winner.slug,
+    created: winner.created,
+    updated: today,
+    definition,
+    members,
+    relatedTopics: [],
+    clusters,
+  };
+
+  return {
+    ...winner,
+    definition,
+    definitionStatus,
+    members,
+    memberCount: members.length,
+    skippedNoUrl,
+    clusters,
+    newContent: formatTopicPage(input),
+  };
 }
 
 function buildPlan(
@@ -245,6 +355,7 @@ function buildPlan(
 
   const createdFromFm = parseYmd(readFrontmatterScalar(text, 'updated'));
   const created = createdFromFm ?? today;
+  const clusters = clustersFromOldPath(oldPath);
 
   const input: TopicPageInput = {
     slug,
@@ -253,6 +364,7 @@ function buildPlan(
     definition,
     members,
     relatedTopics: [],
+    clusters,
   };
   const newContent = formatTopicPage(input);
 
@@ -266,6 +378,7 @@ function buildPlan(
     memberCount: members.length,
     skippedNoUrl,
     created,
+    clusters,
     newContent,
   };
 }
@@ -314,13 +427,27 @@ async function main(): Promise<void> {
     plans.push(buildPlan(oldPath, text, articles, today));
   }
 
-  // Phase 2: collision-resolve. Plans that don't win are dropped.
+  // Phase 2: collision-resolve, then fold loser data into the winners
+  // (cluster union, member-list union, definition fallback) so no signal
+  // from a losing plan is dropped on the floor.
   const collision = planCollisions(
     plans.map((p) => ({ oldPath: p.oldPath, newPath: p.newPath, memberCount: p.memberCount })),
   );
   const resolvedKeys = new Set(collision.resolved.map((r) => `${r.oldPath}\0${r.newPath}`));
-  const winners = plans.filter((p) => resolvedKeys.has(`${p.oldPath}\0${p.newPath}`));
+  const rawWinners = plans.filter((p) => resolvedKeys.has(`${p.oldPath}\0${p.newPath}`));
   const losers = plans.filter((p) => !resolvedKeys.has(`${p.oldPath}\0${p.newPath}`));
+
+  // Group losers by newPath so we can find which losers fold into which winner.
+  const losersByNewPath = new Map<string, PagePlan[]>();
+  for (const l of losers) {
+    const arr = losersByNewPath.get(l.newPath) ?? [];
+    arr.push(l);
+    losersByNewPath.set(l.newPath, arr);
+  }
+  const winners: PagePlan[] = rawWinners.map((w) => {
+    const ls = losersByNewPath.get(w.newPath) ?? [];
+    return ls.length > 0 ? foldLosersIntoWinner(w, ls, today) : w;
+  });
 
   // Phase 3: report.
   const movedCount = winners.filter((p) => p.oldPath !== p.newPath).length;
@@ -328,35 +455,41 @@ async function main(): Promise<void> {
   let totalMembers = 0;
   let pagesWithDef = 0;
   let totalSkippedNoUrl = 0;
+  let pagesWithClusters = 0;
   for (const p of winners) {
     totalMembers += p.memberCount;
     if (p.definitionStatus === 'extracted') pagesWithDef++;
+    if (p.clusters.length > 0) pagesWithClusters++;
     totalSkippedNoUrl += p.skippedNoUrl;
     const arrow = p.oldPath === p.newPath ? 'in place' : `→ ${p.newPath}`;
+    const clusterTag = p.clusters.length > 0 ? `  clusters=[${p.clusters.join(',')}]` : '';
     console.log(
       `[migrate-topics-v2] ${p.oldPath} ${arrow}  def=${p.definitionStatus}  members=${p.memberCount}` +
+        clusterTag +
         (p.skippedNoUrl > 0 ? `  skipped-no-url=${p.skippedNoUrl}` : ''),
     );
   }
 
   if (collision.conflicts.length > 0) {
     console.log('');
-    console.log(`[migrate-topics-v2] COLLISIONS (${collision.conflicts.length}):`);
+    console.log(`[migrate-topics-v2] COLLISIONS (${collision.conflicts.length}, folded into winners):`);
     for (const c of collision.conflicts) {
-      console.log(`  ${c.newPath} chosen=${c.chosen}`);
+      const winner = winners.find((w) => w.newPath === c.newPath);
+      const foldedClusters = winner ? `  clusters=[${winner.clusters.join(',')}]` : '';
+      console.log(`  ${c.newPath} chosen=${c.chosen}${foldedClusters}`);
       for (const cand of c.candidates) {
-        const tag = cand.oldPath === c.chosen ? '(WIN)' : '(drop)';
+        const tag = cand.oldPath === c.chosen ? '(WIN)' : '(fold)';
         console.log(`    ${tag} ${cand.oldPath} members=${cand.memberCount}`);
       }
     }
-    console.log(`[migrate-topics-v2] dropped (collision losers): ${losers.length}`);
+    console.log(`[migrate-topics-v2] folded losers (will be git rm'd on --apply): ${losers.length}`);
   }
 
   console.log('');
   console.log(
     `[migrate-topics-v2] summary: winners=${winners.length} moved=${movedCount} in-place=${inPlaceCount} ` +
-      `with-def=${pagesWithDef} total-members=${totalMembers} skipped-no-url=${totalSkippedNoUrl} ` +
-      `collision-losers=${losers.length}`,
+      `with-def=${pagesWithDef} with-clusters=${pagesWithClusters} total-members=${totalMembers} ` +
+      `skipped-no-url=${totalSkippedNoUrl} folded-losers=${losers.length}`,
   );
 
   if (!apply) {
@@ -373,9 +506,7 @@ async function main(): Promise<void> {
   }
 
   // Move files first (git mv preserves history). For winners that stay in
-  // place, no move needed — we just overwrite. For losers, we leave them
-  // alone in this script (a subsequent cleanup pass can prune them once the
-  // operator confirms the resolution).
+  // place, no move needed — we just overwrite.
   for (const p of winners) {
     if (p.oldPath === p.newPath) continue;
     // git mv into a deeper-or-shallower path requires the parent dir to exist.
@@ -383,9 +514,17 @@ async function main(): Promise<void> {
     await runGit(env.vaultDir, ['mv', '-f', p.oldPath, p.newPath]);
   }
 
-  // Write new content to the new (now-current) path.
+  // Write new content to the new (now-current) path. Winners that folded
+  // loser data carry the merged member-lists + cluster unions here.
   for (const p of winners) {
     await vault.write(p.newPath, p.newContent);
+  }
+
+  // Remove loser files — their content (members, definition, clusters) is now
+  // folded into the winner at the same newPath, so the loser file is
+  // strictly redundant. git rm so the commit cleanly removes them.
+  for (const l of losers) {
+    await runGit(env.vaultDir, ['rm', '-f', l.oldPath]);
   }
 
   // Rewrite wikilinks across the entire wiki/.
@@ -413,7 +552,10 @@ async function main(): Promise<void> {
     remote: env.vaultRemote,
     branch: env.vaultBranch,
   });
-  const message = `migrate-topics-v2: flatten ${winners.length} topic pages, rewrite ${filesUpdated} wikilinks`;
+  const message =
+    `migrate-topics-v2: flatten ${winners.length} topic pages` +
+    (losers.length > 0 ? `, fold ${losers.length} collision losers` : '') +
+    `, rewrite ${filesUpdated} wikilinks`;
   const result = await git.commit(message, ['wiki/']);
   if (result.committed) {
     console.log(`[migrate-topics-v2] committed ${result.sha?.slice(0, 7)} — ${message}`);

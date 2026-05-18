@@ -323,6 +323,29 @@ describe('formatTopicPage', () => {
     const fm = parseFrontmatter(out);
     expect(fm.sources).toBe('2');
   });
+
+  it('omits the clusters field when not provided', () => {
+    const out = formatTopicPage(baseTopicInput());
+    expect(out).not.toContain('clusters:');
+  });
+
+  it('omits the clusters field when explicitly empty', () => {
+    const out = formatTopicPage(baseTopicInput({ clusters: [] }));
+    expect(out).not.toContain('clusters:');
+  });
+
+  it('emits clusters as inline array when non-empty', () => {
+    const out = formatTopicPage(baseTopicInput({ clusters: ['physics', 'computing'] }));
+    expect(out).toContain('clusters: [physics, computing]');
+    // sits in frontmatter between sources and related_topics
+    const fm = parseFrontmatter(out);
+    expect(fm.clusters).toBe('[physics, computing]');
+  });
+
+  it('emits a single-element clusters array correctly', () => {
+    const out = formatTopicPage(baseTopicInput({ clusters: ['ai-ml'] }));
+    expect(out).toContain('clusters: [ai-ml]');
+  });
 });
 
 describe('appendMemberSource', () => {

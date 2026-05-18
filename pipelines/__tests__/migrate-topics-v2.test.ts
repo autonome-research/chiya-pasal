@@ -4,6 +4,8 @@ import {
   flattenTopicPath,
   topicSlugFromPath,
   planCollisions,
+  clustersFromOldPath,
+  foldLosersIntoWinner,
 } from '../src/migrate-topics-v2.js';
 
 describe('extractDefinition', () => {
@@ -214,5 +216,162 @@ describe('planCollisions', () => {
     );
     expect(result.resolved).toHaveLength(2);
     expect(result.conflicts).toHaveLength(1);
+  });
+});
+
+describe('clustersFromOldPath', () => {
+  it('returns a single cluster for one-level nesting', () => {
+    expect(clustersFromOldPath('wiki/topics/physics/quantum-sensing.md')).toEqual(['physics']);
+    expect(clustersFromOldPath('wiki/topics/ai-ml/agent-memory.md')).toEqual(['ai-ml']);
+  });
+
+  it('returns an empty list for a flat path', () => {
+    expect(clustersFromOldPath('wiki/topics/quantum-sensing.md')).toEqual([]);
+  });
+
+  it('returns all intermediate dirs for deeper nesting', () => {
+    expect(clustersFromOldPath('wiki/topics/biology/digital-twin/foo.md')).toEqual([
+      'biology',
+      'digital-twin',
+    ]);
+  });
+
+  it('returns an empty list for paths outside wiki/topics/', () => {
+    expect(clustersFromOldPath('wiki/entities/openai.md')).toEqual([]);
+    expect(clustersFromOldPath('raw/inbox/2026-05.md')).toEqual([]);
+  });
+});
+
+describe('foldLosersIntoWinner', () => {
+  const today = new Date('2026-05-17T00:00:00Z');
+  const baseDate = new Date('2026-04-01T00:00:00Z');
+
+  // Helper to make a PagePlan-shaped object without dragging in the full
+  // interface. The fold function only reads a subset of fields; we rebuild
+  // newContent on the way out so its initial value doesn't matter.
+  function plan(overrides: {
+    oldPath: string;
+    clusters: string[];
+    definition?: string;
+    members?: Array<{ filename: string; title: string; collected: Date }>;
+  }): Parameters<typeof foldLosersIntoWinner>[0] {
+    const newPath = 'wiki/topics/foo.md';
+    const definition = overrides.definition ?? '';
+    const members = overrides.members ?? [];
+    return {
+      oldPath: overrides.oldPath,
+      newPath,
+      slug: 'foo',
+      definition,
+      definitionStatus: definition.length > 0 ? 'extracted' : 'empty',
+      members,
+      memberCount: members.length,
+      skippedNoUrl: 0,
+      created: baseDate,
+      clusters: overrides.clusters,
+      newContent: '',
+    };
+  }
+
+  it('unions clusters across winner + losers, preserving winner-first order', () => {
+    const winner = plan({ oldPath: 'wiki/topics/physics/foo.md', clusters: ['physics'] });
+    const losers = [
+      plan({ oldPath: 'wiki/topics/computing/foo.md', clusters: ['computing'] }),
+      plan({ oldPath: 'wiki/topics/foo.md', clusters: [] }),
+    ];
+    const folded = foldLosersIntoWinner(winner, losers, today);
+    expect(folded.clusters).toEqual(['physics', 'computing']);
+  });
+
+  it('dedupes clusters that appear in both winner and losers', () => {
+    const winner = plan({ oldPath: 'wiki/topics/physics/foo.md', clusters: ['physics'] });
+    const losers = [
+      plan({ oldPath: 'wiki/topics/physics/sub/foo.md', clusters: ['physics', 'sub'] }),
+    ];
+    const folded = foldLosersIntoWinner(winner, losers, today);
+    expect(folded.clusters).toEqual(['physics', 'sub']);
+  });
+
+  it('unions member lists by filename; winner wins on collision', () => {
+    const winner = plan({
+      oldPath: 'wiki/topics/physics/foo.md',
+      clusters: ['physics'],
+      members: [
+        { filename: 'arxiv-001', title: 'A (winner)', collected: baseDate },
+      ],
+    });
+    const losers = [
+      plan({
+        oldPath: 'wiki/topics/computing/foo.md',
+        clusters: ['computing'],
+        members: [
+          { filename: 'arxiv-001', title: 'A (loser)', collected: baseDate },
+          { filename: 'arxiv-002', title: 'B', collected: baseDate },
+        ],
+      }),
+    ];
+    const folded = foldLosersIntoWinner(winner, losers, today);
+    expect(folded.members.map((m) => m.filename).sort()).toEqual(['arxiv-001', 'arxiv-002']);
+    const a = folded.members.find((m) => m.filename === 'arxiv-001');
+    expect(a?.title).toBe('A (winner)');
+    expect(folded.memberCount).toBe(2);
+  });
+
+  it('keeps winner definition when non-empty', () => {
+    const winner = plan({
+      oldPath: 'wiki/topics/physics/foo.md',
+      clusters: ['physics'],
+      definition: 'Winner definition.',
+    });
+    const losers = [
+      plan({
+        oldPath: 'wiki/topics/computing/foo.md',
+        clusters: ['computing'],
+        definition: 'A much longer loser definition that should not displace the winner.',
+      }),
+    ];
+    const folded = foldLosersIntoWinner(winner, losers, today);
+    expect(folded.definition).toBe('Winner definition.');
+    expect(folded.definitionStatus).toBe('extracted');
+  });
+
+  it('falls back to longest non-empty loser definition when winner is empty', () => {
+    const winner = plan({
+      oldPath: 'wiki/topics/physics/foo.md',
+      clusters: ['physics'],
+      definition: '',
+    });
+    const losers = [
+      plan({ oldPath: 'wiki/topics/a/foo.md', clusters: ['a'], definition: 'short.' }),
+      plan({
+        oldPath: 'wiki/topics/b/foo.md',
+        clusters: ['b'],
+        definition: 'a longer fallback definition with more substance.',
+      }),
+      plan({ oldPath: 'wiki/topics/c/foo.md', clusters: ['c'], definition: '' }),
+    ];
+    const folded = foldLosersIntoWinner(winner, losers, today);
+    expect(folded.definition).toBe('a longer fallback definition with more substance.');
+    expect(folded.definitionStatus).toBe('extracted');
+  });
+
+  it('preserves winner empty definition when no loser has one either', () => {
+    const winner = plan({ oldPath: 'wiki/topics/physics/foo.md', clusters: ['physics'] });
+    const losers = [plan({ oldPath: 'wiki/topics/computing/foo.md', clusters: ['computing'] })];
+    const folded = foldLosersIntoWinner(winner, losers, today);
+    expect(folded.definition).toBe('');
+    expect(folded.definitionStatus).toBe('empty');
+  });
+
+  it('renders newContent with the merged clusters in frontmatter', () => {
+    const winner = plan({
+      oldPath: 'wiki/topics/physics/foo.md',
+      clusters: ['physics'],
+      definition: 'A foo.',
+    });
+    const losers = [plan({ oldPath: 'wiki/topics/computing/foo.md', clusters: ['computing'] })];
+    const folded = foldLosersIntoWinner(winner, losers, today);
+    expect(folded.newContent).toContain('clusters: [physics, computing]');
+    expect(folded.newContent).toContain('A foo.');
   });
 });

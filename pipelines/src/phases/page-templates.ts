@@ -35,6 +35,14 @@ export interface TopicPageInput {
   definition: string;
   members: Array<{ filename: string; title: string; collected: Date }>;
   relatedTopics: Array<{ slug: string; reason: string }>;
+  /**
+   * Soft cluster memberships preserved across migrations and tracked as the
+   * librarian routes new sources. Empty (the default) means the topic isn't
+   * scoped to any domain — orthogonal to any rigid taxonomy. Multiple values
+   * are explicitly supported: a topic that spans several domains carries all
+   * of them. Emitted as a YAML inline array only when non-empty.
+   */
+  clusters?: string[];
 }
 
 // arXiv: any of /abs/ or /pdf/, optional version, optional .pdf, optional query/fragment.
@@ -169,9 +177,14 @@ export function formatTopicPage(input: TopicPageInput): string {
     `created: ${ymd(input.created)}`,
     `updated: ${ymd(input.updated)}`,
     `sources: ${input.members.length}`,
+  ];
+  if (input.clusters && input.clusters.length > 0) {
+    fmLines.push(`clusters: ${yamlInlineArray(input.clusters)}`);
+  }
+  fmLines.push(
     `related_topics: ${yamlInlineArray(input.relatedTopics.map((r) => r.slug))}`,
     '---',
-  ];
+  );
 
   const body: string[] = [
     '',
