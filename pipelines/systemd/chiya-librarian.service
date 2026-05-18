@@ -6,6 +6,13 @@ After=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=%h/chiya-library/pipelines
+# Rebuild the better-sqlite3 native binding against the running Node ABI.
+# When Node gets upgraded out-of-band (apt unattended-upgrades, manual nvm
+# bump) the precompiled .node file is silently incompatible and every service
+# using this node_modules crashes at first DB open. Rebuilding before each
+# run is ~1s when the binding's already current and the only reliable fix
+# when it isn't.
+ExecStartPre=/usr/bin/env npm rebuild better-sqlite3 --silent
 # v3 pipeline: per-article router → 4 parallel scouts → reviewer → deterministic
 # write. Outer batch concurrency=4, per-article wall ~50-85s under load (7 LLM
 # calls per article). batch=10 + minutes=8 lands ~4-5 min, comfortably under
