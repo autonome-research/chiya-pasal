@@ -1,0 +1,4 @@
+# Python dependencies for matcha collection scripts
+# Pin to specific versions for reproducible builds.
+
+PyYAML>=6.0,<7.0

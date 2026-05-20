@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """api_ingest.py - Fast API ingestion for matcha's curated digest."""
-import sys, re, time, json, os, urllib.request, urllib.parse, urllib.error
+import sys, re, time, json, os, urllib.request, urllib.parse, urllib.error, logging
 from datetime import datetime
 from collections import defaultdict
 from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor
 import xml.etree.ElementTree as ET
+import yaml
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MATCHA_DIR = os.path.dirname(SCRIPT_DIR)
@@ -14,6 +15,36 @@ DIGEST_OUT = os.path.join(SCRIPT_DIR, "api-digest.md")
 API_MAX_RESULTS = int(os.environ.get("API_MAX_RESULTS", "6"))
 MIN_OUTPUT_ABSTRACT_CHARS = int(os.environ.get("MIN_OUTPUT_ABSTRACT_CHARS", "80"))
 MAX_OUTPUT_ABSTRACT_CHARS = int(os.environ.get("MAX_OUTPUT_ABSTRACT_CHARS", "1200"))
+
+# Logging — errors go to stderr so cron/systemd journal captures them
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stderr,
+)
+logger = logging.getLogger("api_ingest")
+
+
+def load_interests():
+    """Load interest keywords from the shared YAML config.
+
+    Reads matcha/interests.yaml (the single source of truth) and returns
+    a flat dict mapping category name → list of lowercase keywords.
+    """
+    yaml_path = os.path.join(MATCHA_DIR, "interests.yaml")
+    try:
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f)
+        interests = data.get("interests", {})
+        return {k: [kw.lower() for kw in v] for k, v in interests.items()}
+    except FileNotFoundError:
+        logger.error("interests.yaml not found at %s — using empty interests", yaml_path)
+        return {}
+    except yaml.YAMLError as e:
+        logger.error("Failed to parse %s: %s — using empty interests", yaml_path, e)
+        return {}
+
 
 CORE_QUERIES = [
     ("large language models transformer reinforcement learning", "AI/ML",
@@ -40,15 +71,7 @@ CORE_QUERIES = [
      ["Zenodo", "Crossref", "OpenAlex"]),
 ]
 
-INTERESTS = {
-    "core": ["large language model", "llm", "gpt", "transformer", "reinforcement",
-             "neural", "deep learning", "ai", "agi", "alignment", "robotics",
-             "synthetic biolo", "drug discovery", "quantum com", "semiconductor",
-             "chip", "EUV", "lithography", "climate", "battery", "energy storage",
-             "renewable", "nanotech", "fusion", "nuclear", "space"],
-    "people": ["lecun", "hinton", "schulman"],
-    "companies": ["deepmind", "google", "meta", "microsoft", "openai", "anthropic"],
-}
+
 
 
 def req(url, timeout=15):
@@ -56,7 +79,14 @@ def req(url, timeout=15):
         r = urllib.request.Request(url, headers={"User-Agent": "Matcha/1.0"})
         resp = urllib.request.urlopen(r, timeout=timeout)
         return resp.read().decode("utf-8", errors="replace")
-    except Exception:
+    except urllib.error.HTTPError as e:
+        logger.warning("HTTP %d from %s", e.code, url.split("/")[2])
+        return ""
+    except urllib.error.URLError as e:
+        logger.error("URL error fetching %s: %s", url.split("/")[2], e.reason)
+        return ""
+    except Exception as e:
+        logger.error("Unexpected error fetching %s: %s", url.split("/")[2], e)
         return ""
 
 
@@ -599,9 +629,11 @@ def parse_paperswithcode(raw):
 def score_article(a, interests):
     title = a.get("title", "").lower()
     rel = 0
-    for kw in interests["core"]:
-        if kw in title:
-            rel += 10
+    for category, keywords in interests.items():
+        weight = 10 if category in ("core",) else 5
+        for kw in keywords:
+            if kw in title:
+                rel += weight
     rel = min(rel, 100)
     recency = 80
     d = a.get("date")
@@ -640,8 +672,14 @@ def main():
     print("api_ingest.py  (fast mode)")
     print("=" * 50)
 
+    # Load interests from shared YAML config
+    interests = load_interests()
+    logger.info("Loaded %d interest categories, %d total keywords",
+                len(interests), sum(len(v) for v in interests.values()))
+
     all_articles = []
     source_stats = defaultdict(int)
+    error_stats = defaultdict(int)
 
     # Collect from all source+query combinations
     for query, domain, sources in CORE_QUERIES:
@@ -657,12 +695,17 @@ def main():
                 source_stats[source_name] += len(articles)
                 all_articles.extend(articles)
             except Exception as e:
-                print(f"  {source_name} failed: {e}", file=sys.stderr)
+                error_stats[source_name] += 1
+                logger.error("%s failed for query '%s': %s", source_name, query[:40], e)
+
+    if error_stats:
+        logger.warning("Sources with errors: %s",
+                       ", ".join(f"{s}={c}" for s, c in error_stats.items()))
 
     # Score and dedup
     scored = []
     for a in all_articles:
-        s = score_article(a, INTERESTS)
+        s = score_article(a, interests)
         scored.append({**a, "relevance": s, "total_score": s})
 
     filtered = dedup_articles(scored)
