@@ -35,7 +35,6 @@ Thumbs.db
 !pipelines/src/**/*.json
 pipelines/node_modules/
 pipelines/dist/
-pipelines/package-lock.json
 pipelines/*.db
 pipelines/*.db-*
 
