@@ -13,9 +13,9 @@
     "digest:pm": "tsx src/digest.ts PM",
     "librarian": "tsx src/librarian.ts",
     "intake": "tsx src/intake.ts",
-    "migrate-queue": "tsx src/migrate-queue.ts",
-    "backfill-source-urls": "tsx src/backfill-source-urls.ts",
-    "migrate-topics-v2": "tsx src/migrate-topics-v2.ts"
+    "migrate-queue": "tsx scripts/migrate-queue.ts",
+    "backfill-source-urls": "tsx scripts/backfill-source-urls.ts",
+    "migrate-topics-v2": "tsx scripts/migrate-topics-v2.ts"
   },
   "dependencies": {
     "thread-phase": "github:Code4me2/thread-phase#88b16b0e02f06c672c5ebdb3379a31d2ae97cff0",

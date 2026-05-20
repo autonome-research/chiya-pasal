@@ -40,17 +40,17 @@
 import { spawn } from 'child_process';
 import { posix } from 'path';
 
-import { ArticleStore, type ArticleRow } from './shared/article-store.js';
-import { loadChiyaEnv } from './shared/env.js';
+import { ArticleStore, type ArticleRow } from '../src/shared/article-store.js';
+import { loadChiyaEnv } from '../src/shared/env.js';
 import {
   formatTopicPage,
   stableIdForUrl,
   stableIdToFilename,
   type TopicPageInput,
-} from './phases/page-templates.js';
-import { rewriteWikilinks, type RenameMap } from './shared/wikilink-rewriter.js';
-import { GitOps } from './tools/git.js';
-import { VaultFs } from './tools/vault.js';
+} from '../src/phases/page-templates.js';
+import { rewriteWikilinks, type RenameMap } from '../src/shared/wikilink-rewriter.js';
+import { GitOps } from '../src/tools/git.js';
+import { VaultFs } from '../src/tools/vault.js';
 
 // ---- pure-function helpers (exported for tests) ---------------------------
 

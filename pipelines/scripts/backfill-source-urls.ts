@@ -22,10 +22,10 @@
  * anywhere" cases that this script can't fix automatically.
  */
 
-import { ArticleStore, type ArticleRow } from './shared/article-store.js';
-import { loadChiyaEnv } from './shared/env.js';
-import { GitOps } from './tools/git.js';
-import { VaultFs } from './tools/vault.js';
+import { ArticleStore, type ArticleRow } from '../src/shared/article-store.js';
+import { loadChiyaEnv } from '../src/shared/env.js';
+import { GitOps } from '../src/tools/git.js';
+import { VaultFs } from '../src/tools/vault.js';
 
 interface PlannedAddition {
   pagePath: string;

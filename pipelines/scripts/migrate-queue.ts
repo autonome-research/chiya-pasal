@@ -19,9 +19,9 @@ import { mkdir, rename, stat, readFile } from 'fs/promises';
 import { join } from 'path';
 import { glob } from 'glob';
 
-import { ArticleStore } from './shared/article-store.js';
-import { parseQueueFile, pickCollectedAt } from './shared/queue-file.js';
-import { loadChiyaEnv } from './shared/env.js';
+import { ArticleStore } from '../src/shared/article-store.js';
+import { parseQueueFile, pickCollectedAt } from '../src/shared/queue-file.js';
+import { loadChiyaEnv } from '../src/shared/env.js';
 
 interface Tally {
   scanned: number;
