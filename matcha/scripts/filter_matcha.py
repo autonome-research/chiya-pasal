@@ -9,7 +9,6 @@ VAULT_DIR env var points to the target vault (default: ~/vault).
 """
 import os
 import re
-import sys
 import json
 from datetime import datetime
 from collections import defaultdict

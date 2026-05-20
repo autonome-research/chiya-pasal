@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """api_ingest.py - Fast API ingestion for matcha's curated digest."""
-import sys, re, time, json, os, urllib.request, urllib.parse, urllib.error, logging
+import os
+import re
+import sys
+import time
+import json
+import logging
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from collections import defaultdict
 from difflib import SequenceMatcher
-from concurrent.futures import ThreadPoolExecutor
 import xml.etree.ElementTree as ET
 import yaml
 
@@ -162,7 +169,7 @@ def parse_openalex(raw):
                 date = datetime.strptime(pub, "%Y-%m-%d")
             except ValueError:
                 pass
-        cats = d.get("best_oa_location", {}).get("host_type", "") if d.get("best_oa_location") else ""
+        # (unused — was host_type, domain comes from topics below)
         fields = d.get("topics", [])
         domain = fields[0].get("display_name", "uncategorized") if fields else "uncategorized"
         abstract = d.get("abstract_inverted_index", {}) or {}
@@ -259,7 +266,6 @@ def parse_zenodo(raw):
             except ValueError:
                 pass
         abstract = meta.get("description", "") or ""
-        concepts = [(c.get("description", ""), 1) for c in meta.get("related_doi", [])]
         domain = "uncategorized"
         arts.append({"title": t, "abstract": abstract, "url": url, "date": date,
                      "source": "Zenodo", "domain": domain,
@@ -409,8 +415,6 @@ def parse_inspire(raw):
         if not t or t in ("None", "", "N/A"):
             t = "INSPIRE Record #" + str(h.get("id", "???"))
         t = str(t)[:200]
-        # DOI from metadata or links
-        doi = meta.get("doi", "") or (h.get("record_metadata", {}).get("inspire_ids", {}).get("journal", {}).get("issue", "") or h.get("record_metadata", {}).get("inspire_ids", {}).get("doi", {}).get("value", "") or "")
         url = "https://inspirehep.net/literature/" + str(h.get("id", "")) if h.get("id") else ""
         # Year from publication_info
         pub_info = meta.get("publication_info", [])

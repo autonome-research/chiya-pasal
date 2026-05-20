@@ -16,7 +16,6 @@ Environment:
 import os
 import sys
 import time
-import json
 import random
 import xml.etree.ElementTree as ET
 import urllib.request
@@ -102,7 +101,7 @@ def fetch_arxiv(query, max_results=20):
         raw = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         if e.code == 429:
-            log(f"  ⏳ Rate limited (429), waiting 10s...")
+            log("  ⏳ Rate limited (429), waiting 10s...")
             time.sleep(10)
         else:
             log(f"  ⚠️ HTTP {e.code} for query '{query}': {e.reason}")
@@ -126,7 +125,7 @@ def fetch_arxiv(query, max_results=20):
         published_el = entry.find("atom:published", ns)
         id_el = entry.find("atom:id", ns)
 
-        if not title_el is None and not id_el is None:
+        if title_el is not None and id_el is not None:
             title = (title_el.text or "").strip().replace("\n", " ")[:200]
             abstract = (summary_el.text or "").strip() if summary_el is not None else ""
             pub = (published_el.text or "")[:10] if published_el is not None else ""
