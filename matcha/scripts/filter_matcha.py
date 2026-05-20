@@ -283,15 +283,15 @@ def main():
     with open(RAW_ARTICLES_PATH, 'a') as f:
         if file_is_new:
             # Write header with vault-contributor frontmatter
-            f.write(f"---\n")
-            f.write(f"source: matcha-pipeline\n")
+            f.write("---\n")
+            f.write("source: matcha-pipeline\n")
             f.write(f"clipped: {datetime.now().isoformat()}\n")
-            f.write(f"contributor: scheduled:rss-feed\n")
-            f.write(f"type: article\n")
-            f.write(f"tags: [auto-collected, research]\n")
-            f.write(f"---\n\n")
+            f.write("contributor: scheduled:rss-feed\n")
+            f.write("type: article\n")
+            f.write("tags: [auto-collected, research]\n")
+            f.write("---\n\n")
             f.write(f"# Raw Articles — {TODAY}\n\n")
-            f.write(f"> Auto-collected from matcha RSS + API pipeline. Deduplicated. Awaiting ingest.\n\n")
+            f.write("> Auto-collected from matcha RSS + API pipeline. Deduplicated. Awaiting ingest.\n\n")
 
         # Get sections from new articles for grouping
         by_section = defaultdict(list)
@@ -299,7 +299,7 @@ def main():
             sec = art.get('section', art.get('domain', art.get('source', 'Other')))
             by_section[sec].append(art)
 
-        f.write(f"---\n")
+        f.write("---\n")
         f.write(f"### Collected at {datetime.now().strftime('%H:%M')}\n")
         f.write(f"### {len(new_articles)} new articles\n\n")
 
