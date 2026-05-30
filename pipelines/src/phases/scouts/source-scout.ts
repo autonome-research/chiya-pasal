@@ -13,7 +13,7 @@
  * `registerArticleLookupTools` is registered for cohesion — the prompt steers
  * usage toward title-search.
  *
- * Dependency-injected runner override mirrors the writeSourceOne pattern so
+ * Dependency-injected runner override mirrors the other scouts' pattern so
  * tests can stub the LLM call without mocking the openai module loader.
  */
 

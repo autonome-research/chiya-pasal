@@ -290,7 +290,7 @@ export const batchExtractRefs = (): Phase<LibrarianCtx> => ({
 // step writes).
 // ---------------------------------------------------------------------------
 
-import { callSummary, type Summarizer } from './write-source-one.js';
+import { callSummary, type Summarizer } from './summary.js';
 import { runRouter, type RouterRunner } from './librarian-router.js';
 import { runTopicScout, type TopicScoutRunner } from './scouts/topic-scout.js';
 import { runSourceScout, type SourceScoutRunner } from './scouts/source-scout.js';
@@ -527,12 +527,7 @@ export const perArticleTree =
 
             // 6. Summary. Truncation throws → caught by outer try; rollback.
             const summary = await summarizer(
-              {
-                article,
-                body,
-                topics: gated.existingTopicSlugs,
-                cites: gated.citeFilenames,
-              },
+              { article, body },
               { client: clients.summaryClient, model: clients.summaryModel },
               signal,
             );
