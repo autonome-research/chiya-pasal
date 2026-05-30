@@ -5,12 +5,12 @@ import {
   batchExtractRefs,
   htmlToText,
   shouldFetch,
-} from '../src/phases/librarian-v2-phases.js';
+} from '../src/phases/librarian-phases.js';
 import type {
   EnrichedArticle,
   ExtractedRefs,
-  LibrarianV2Ctx,
-} from '../src/shared/librarian-v2-types.js';
+  LibrarianCtx,
+} from '../src/shared/librarian-types.js';
 import type { ArticleRow } from '../src/shared/article-store.js';
 
 // Drain a phase generator, collecting yielded events. Ignores typing of the
@@ -21,14 +21,13 @@ async function drain<T>(gen: AsyncGenerator<T, void>): Promise<T[]> {
   return out;
 }
 
-// Minimal ctx factory; the v2 phases only touch a handful of fields.
-function makeCtx(partial: Partial<LibrarianV2Ctx>): LibrarianV2Ctx {
+function makeCtx(partial: Partial<LibrarianCtx>): LibrarianCtx {
   return {
-    cache: new Map() as unknown as LibrarianV2Ctx['cache'],
+    cache: new Map() as unknown as LibrarianCtx['cache'],
     batchSize: 10,
     signal: new AbortController().signal,
     ...partial,
-  } as LibrarianV2Ctx;
+  } as LibrarianCtx;
 }
 
 function mkRow(over: Partial<ArticleRow>): ArticleRow {

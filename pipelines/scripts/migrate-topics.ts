@@ -410,14 +410,14 @@ async function main(): Promise<void> {
   const store = new ArticleStore(dbPath);
 
   console.log(
-    `[migrate-topics-v2] vault=${env.vaultDir} db=${dbPath} mode=${apply ? 'APPLY' : 'dry-run'}`,
+    `[migrate-topics] vault=${env.vaultDir} db=${dbPath} mode=${apply ? 'APPLY' : 'dry-run'}`,
   );
 
   const today = new Date();
   const allTopicPages = (await vault.list('wiki/topics/**/*.md')).filter(
     (p) => !p.includes('/archive/'),
   );
-  console.log(`[migrate-topics-v2] discovered ${allTopicPages.length} topic page(s)`);
+  console.log(`[migrate-topics] discovered ${allTopicPages.length} topic page(s)`);
 
   // Phase 1: build a plan per page.
   const plans: PagePlan[] = [];
@@ -464,7 +464,7 @@ async function main(): Promise<void> {
     const arrow = p.oldPath === p.newPath ? 'in place' : `→ ${p.newPath}`;
     const clusterTag = p.clusters.length > 0 ? `  clusters=[${p.clusters.join(',')}]` : '';
     console.log(
-      `[migrate-topics-v2] ${p.oldPath} ${arrow}  def=${p.definitionStatus}  members=${p.memberCount}` +
+      `[migrate-topics] ${p.oldPath} ${arrow}  def=${p.definitionStatus}  members=${p.memberCount}` +
         clusterTag +
         (p.skippedNoUrl > 0 ? `  skipped-no-url=${p.skippedNoUrl}` : ''),
     );
@@ -472,7 +472,7 @@ async function main(): Promise<void> {
 
   if (collision.conflicts.length > 0) {
     console.log('');
-    console.log(`[migrate-topics-v2] COLLISIONS (${collision.conflicts.length}, folded into winners):`);
+    console.log(`[migrate-topics] COLLISIONS (${collision.conflicts.length}, folded into winners):`);
     for (const c of collision.conflicts) {
       const winner = winners.find((w) => w.newPath === c.newPath);
       const foldedClusters = winner ? `  clusters=[${winner.clusters.join(',')}]` : '';
@@ -482,18 +482,18 @@ async function main(): Promise<void> {
         console.log(`    ${tag} ${cand.oldPath} members=${cand.memberCount}`);
       }
     }
-    console.log(`[migrate-topics-v2] folded losers (will be git rm'd on --apply): ${losers.length}`);
+    console.log(`[migrate-topics] folded losers (will be git rm'd on --apply): ${losers.length}`);
   }
 
   console.log('');
   console.log(
-    `[migrate-topics-v2] summary: winners=${winners.length} moved=${movedCount} in-place=${inPlaceCount} ` +
+    `[migrate-topics] summary: winners=${winners.length} moved=${movedCount} in-place=${inPlaceCount} ` +
       `with-def=${pagesWithDef} with-clusters=${pagesWithClusters} total-members=${totalMembers} ` +
       `skipped-no-url=${totalSkippedNoUrl} folded-losers=${losers.length}`,
   );
 
   if (!apply) {
-    console.log('[migrate-topics-v2] dry run — no files written. Re-run with --apply to commit.');
+    console.log('[migrate-topics] dry run — no files written. Re-run with --apply to commit.');
     store.close();
     return;
   }
@@ -549,7 +549,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `[migrate-topics-v2] wikilink rewrite: scanned=${filesScanned} updated=${filesUpdated}`,
+    `[migrate-topics] wikilink rewrite: scanned=${filesScanned} updated=${filesUpdated}`,
   );
 
   const git = new GitOps({
@@ -558,14 +558,14 @@ async function main(): Promise<void> {
     branch: env.vaultBranch,
   });
   const message =
-    `migrate-topics-v2: flatten ${winners.length} topic pages` +
+    `migrate-topics: flatten ${winners.length} topic pages` +
     (losers.length > 0 ? `, fold ${losers.length} collision losers` : '') +
     `, rewrite ${filesUpdated} wikilinks`;
   const result = await git.commit(message, ['wiki/']);
   if (result.committed) {
-    console.log(`[migrate-topics-v2] committed ${result.sha?.slice(0, 7)} — ${message}`);
+    console.log(`[migrate-topics] committed ${result.sha?.slice(0, 7)} — ${message}`);
   } else {
-    console.log('[migrate-topics-v2] git: no changes to commit');
+    console.log('[migrate-topics] git: no changes to commit');
   }
 
   store.close();
@@ -575,16 +575,16 @@ function stripMd(path: string): string {
   return path.endsWith('.md') ? path.slice(0, -3) : path;
 }
 
-// Run only when invoked directly (e.g. `tsx src/migrate-topics-v2.ts`),
+// Run only when invoked directly (e.g. `tsx scripts/migrate-topics.ts`),
 // not when imported by tests.
 const invokedDirectly =
   import.meta.url === `file://${process.argv[1]}` ||
-  process.argv[1]?.endsWith('migrate-topics-v2.ts') ||
-  process.argv[1]?.endsWith('migrate-topics-v2.js');
+  process.argv[1]?.endsWith('migrate-topics.ts') ||
+  process.argv[1]?.endsWith('migrate-topics.js');
 
 if (invokedDirectly) {
   main().catch((err) => {
-    console.error('[migrate-topics-v2] fatal:', err);
+    console.error('[migrate-topics] fatal:', err);
     process.exit(1);
   });
 }

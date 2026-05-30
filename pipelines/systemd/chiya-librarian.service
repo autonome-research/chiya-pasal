@@ -1,5 +1,5 @@
 [Unit]
-Description=Chiya librarian (v3) — drain pending articles via agentic exploration
+Description=Chiya librarian — drain pending articles via agentic exploration
 Documentation=https://github.com/Code4me2/chiya-library
 After=network-online.target
 
@@ -13,11 +13,11 @@ WorkingDirectory=%h/chiya-library/pipelines
 # run is ~1s when the binding's already current and the only reliable fix
 # when it isn't.
 ExecStartPre=/usr/bin/env npm rebuild better-sqlite3 --silent
-# v3 pipeline: per-article router → 4 parallel scouts → reviewer → deterministic
-# write. Outer batch concurrency=4, per-article wall ~50-85s under load (7 LLM
-# calls per article). batch=10 + minutes=8 lands ~4-5 min, comfortably under
-# the 10-min timer cadence.
-ExecStart=/usr/bin/env npx tsx src/librarian-v2.ts --batch=10 --minutes=8
+# Per-article router → 4 parallel scouts → reviewer → deterministic write.
+# Outer batch concurrency=4, per-article wall ~50-85s under load (7 LLM calls
+# per article). batch=10 + minutes=8 lands ~4-5 min, comfortably under the
+# 10-min timer cadence.
+ExecStart=/usr/bin/env npx tsx src/librarian.ts --batch=10 --minutes=8
 Environment=VAULT_DIR=%h/vault
 # Loads CHIYA_EMAIL_TO and any local overrides; leading `-` keeps the unit
 # valid on hosts that haven't set up the file yet.

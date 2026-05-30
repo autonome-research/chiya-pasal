@@ -5,7 +5,7 @@ import { join } from 'path';
 import type OpenAI from 'openai';
 
 import { ArticleStore, type ArticleRow } from '../../src/shared/article-store.js';
-import type { ExtractedRefs } from '../../src/shared/librarian-v2-types.js';
+import type { ExtractedRefs } from '../../src/shared/librarian-types.js';
 import { VaultFs } from '../../src/tools/vault.js';
 import {
   preResolveCandidates,

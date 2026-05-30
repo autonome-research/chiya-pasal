@@ -1,36 +1,49 @@
 /**
- * Librarian pipeline phases.
+ * Librarian phases. Sources are first-class wiki pages, topics are routing
+ * nodes. See src/librarian.ts for the phase composition.
  *
- * Composed in src/librarian.ts. Order:
- *   reapStale → loadBatch → processBatch → mergeMetadata → commitLocal
- *
- * Per-article work happens inside processBatch's bounded fanout. Each
- * worker does triage (cheap LLM, no_think) → maybe-upsert (heavy LLM with
- * vault tools) → DB status transition. No /tmp deltas; per-worker
- * ArticleResult flows back through ctx for mergeMetadata.
+ * Phases below are organized in execution order:
+ *   - reapStale + loadBatch: queue management.
+ *   - batchEnrich + batchExtractRefs: pre-fan-out prep (full-text fetch + ref
+ *     extraction). No LLM, no per-article work yet.
+ *   - perArticleTree: bounded-concurrency fan-out across the batch. Each
+ *     per-article runner does router → 4 scouts (parallel) → reviewer →
+ *     deterministic write (source page + topic touches + backlinks).
+ *   - mergeMetadata + commitLocal close out the batch.
  */
 
 import {
-  parseJSON,
   requireCtx,
-  runAgentWithTools,
-  ToolRegistry,
   type Phase,
 } from 'thread-phase';
 import { boundedFanout } from 'thread-phase/patterns';
 import type OpenAI from 'openai';
+import { setMaxListeners } from 'events';
+import { basename } from 'path';
 
-import { ArticleStore, type ArticleRow } from '../shared/article-store.js';
-import type { ArticleResult, LibrarianCtx } from '../shared/librarian-types.js';
-import { GitOps } from '../tools/git.js';
-import { VaultFs, registerVaultToolsTracked, type WriteTracker } from '../tools/vault.js';
-import { registerWebTools } from '../tools/web.js';
+import { ArticleStore } from '../shared/article-store.js';
+import type {
+  ArticleResult,
+  EnrichedArticle,
+  ExtractedRefs,
+  LibrarianCtx,
+} from '../shared/librarian-types.js';
+import type { GitOps } from '../tools/git.js';
+import type { VaultFs } from '../tools/vault.js';
+import { extractArxivIds, extractDois } from '../shared/refs.js';
+import {
+  appendCitedBy,
+  appendMemberSource,
+  formatTopicPage,
+  stableIdForUrl,
+  stableIdToFilename,
+} from './page-templates.js';
+
+// ---------------------------------------------------------------------------
+// reapStale + loadBatch — queue management before the fan-out.
+// ---------------------------------------------------------------------------
 
 const STALE_PROCESSING_MINUTES = 60;
-
-// ---------------------------------------------------------------------------
-// reapStale — recover any rows stuck in 'processing' from a crashed run
-// ---------------------------------------------------------------------------
 
 export const reapStale = (store: ArticleStore): Phase<LibrarianCtx> => ({
   name: 'reap-stale',
@@ -46,508 +59,653 @@ export const reapStale = (store: ArticleStore): Phase<LibrarianCtx> => ({
   },
 });
 
-// ---------------------------------------------------------------------------
-// loadBatch — pull next N pending rows; mark all as 'processing' atomically
-// ---------------------------------------------------------------------------
-
 export const loadBatch = (store: ArticleStore): Phase<LibrarianCtx> => ({
   name: 'load-batch',
   async *run(ctx) {
     const batch = store.listPending(ctx.batchSize);
     ctx.batch = batch;
-
-    for (const row of batch) {
-      store.markProcessing(row.id);
-    }
-
-    if (batch.length === 0) {
-      ctx.stop = { reason: 'queue-empty' };
-    }
-
+    for (const row of batch) store.markProcessing(row.id);
+    if (batch.length === 0) ctx.stop = { reason: 'queue-empty' };
     yield {
       type: 'phase',
       phase: 'load-batch',
       detail: `${batch.length} article(s) pulled (status='processing')`,
-      counts: { batch: batch.length, totalPending: store.countByStatus().pending + batch.length },
+      counts: {
+        batch: batch.length,
+        totalPending: store.countByStatus().pending + batch.length,
+      },
     };
   },
 });
 
 // ---------------------------------------------------------------------------
-// processBatch — per-article: triage → maybe-upsert. Bounded fan-out.
+// batchEnrich — fan-out HTTP fetches for articles whose snippet is too thin
+// to classify or summarize.
 // ---------------------------------------------------------------------------
 
-const TRIAGE_SYSTEM = `You are a research wiki librarian's first-pass triager. You decide whether an article is worth turning into / updating a wiki page.
+const ENRICH_SNIPPET_THRESHOLD = 200;
+const ENRICH_CONCURRENCY = 4;
+const ENRICH_FETCH_TIMEOUT_MS = 15_000;
+const ENRICH_BODY_CAP = 50_000;
+const ENRICH_USER_AGENT = 'chiya-librarian/2.0';
 
-Reply ONLY with JSON of the form:
-{"keep": true | false, "reason": "<one short clause>"}
-
-Skip ("keep": false) when:
-- the title indicates a correction, erratum, retraction, addendum, editorial, or table-of-contents
-- the snippet is empty AND the URL is empty (nothing to research)
-- the article is in an off-domain field (humanities, education, law unless legal-tech) given the user's interests
-- the snippet is OCR garbage (repeated words like "the the the")
-- it's a near-duplicate of a topic the wiki already covers extensively (use the index excerpt below)
-
-Keep ("keep": true) when there's any plausible signal — substantive abstract, recognizable research, named entities, novel field intersection. Be moderately permissive; the heavy upsert phase will do a deeper check.`;
-
-const UPSERT_SYSTEM_TEMPLATE = (
-  taste: string,
-  index: string,
-) => `You are a research wiki librarian. You read one article at a time, decide whether to create or update wiki pages, and use the provided tools to actually do it.
-
-You have these tools:
-- vault_read(path)            — read a vault file
-- vault_write(path, content)  — write/overwrite a vault file (creates dirs)
-- vault_list(pattern)         — glob within the vault
-- vault_exists(path)          — check existence
-- web_fetch(url)              — fetch a URL when the snippet is too thin
-
-Process:
-1. If the snippet is shorter than ~200 chars and the URL is non-empty, fetch the URL for more context. (Skip fetch for bare DOI URLs that aren't HTTP.)
-2. Decide: is there an entity or topic where this article would meaningfully strengthen the wiki?
-   - If no: respond with {"action": "skipped", "reason": "<short>", "paths": []}
-   - If yes (create): write a new page with the conventions in step 3.
-   - If yes (update): vault_read(path) FIRST to see the current content. Merge new material into the body where it fits, then handle ## Sources per the rules below.
-3. When writing pages, follow these conventions:
-   - YAML frontmatter: type, status, updated (today's date), sources (count), tags, confidence
-   - Lowercase-hyphen filenames, no spaces
-   - At least 2 [[wikilinks]] per page
-   - File under the right dir: entities/, topics/<field>/, projects/, research/<project>/
-   - Topic pages should synthesize across sources, not just summarize this one
-   - EVERY page MUST end with a "## Sources" section. Each cited article is one bullet, in this exact format:
-       - [{source} ({collected}): {title}]({url})
-     where {source}, {collected}, {title}, and {url} come verbatim from the article fields in the user message — do NOT invent URLs, dates, or source names. If {url} is "(empty)", drop the parens and write the bullet as plain text:
-       - {source} ({collected}): {title}
-   - On UPDATE: ALWAYS add a new bullet for THE CURRENT ARTICLE'S URL (from the user message above) to the existing ## Sources list. The fact that the page already has bullets from prior articles does NOT satisfy this — those are different articles' URLs. The only time to skip the new bullet is if THIS article's exact URL already appears in the list. Do not rewrite or reorder existing bullets.
-   - The frontmatter "sources:" count must equal the number of bullets under ## Sources after your write.
-
-Tag taxonomy is documented in CLAUDE.md at the vault root. Before you assign tags, call vault_read("CLAUDE.md") and use only tags from the "Tag taxonomy" section. Do not invent new tags.
-
-After writing, respond with:
-{
-  "action": "created" | "updated" | "skipped",
-  "reason": "<short>",
-  "paths": ["wiki/topics/...", ...],
-  "logEntry": "<one line for log.md, no leading ##>",
-  "indexDeltas": ["<index line for new/updated entry>", ...]
+/**
+ * Decide whether a row needs an HTTP fetch. Skip when the snippet is already
+ * fat enough OR when there's no http(s) URL we can simply GET.
+ */
+export function shouldFetch(article: { snippet: string | null; url: string | null }): boolean {
+  const { snippet, url } = article;
+  if (snippet !== null && snippet.length >= ENRICH_SNIPPET_THRESHOLD) return false;
+  if (!url) return false;
+  if (!/^https?:\/\//i.test(url)) return false;
+  return true;
 }
 
-Be efficient. One vault_read on the index when needed, then act.
-
-================================================================================
-USER CONTEXT (cached prefix — same across articles in this run)
-================================================================================
-
-## TASTE
-${taste.slice(0, 1500) || '(empty)'}
-
-## Wiki index excerpt (first 4k chars)
-${index.slice(0, 4000)}`;
-
-export interface ProcessBatchClients {
-  /** Fast no-tool model for the triage gate. */
-  triageClient: OpenAI;
-  triageModel: string;
-  /** Tool-capable model for wiki upsert (vault read/write + web fetch). */
-  upsertClient: OpenAI;
-  upsertModel: string;
+/**
+ * Minimal HTML→plain-text pass for enrichment bodies. Not a full parser:
+ *   - Drop <script> / <style> blocks (with content) entirely.
+ *   - Turn block-ish open tags (<br>, <p>, <div>, <li>) into newlines.
+ *   - Strip everything else that looks like a tag.
+ *   - Decode the small set of HTML entities we actually see in the wild.
+ *   - Collapse whitespace runs and cap length.
+ */
+export function htmlToText(html: string): string {
+  if (!html) return '';
+  let s = html;
+  // Drop script/style blocks (with their contents) before any other tag pass.
+  s = s.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, ' ');
+  s = s.replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, ' ');
+  // Block-ish open tags become newlines so paragraph boundaries survive.
+  s = s.replace(/<(?:br|p|div|li)\b[^>]*\/?>/gi, '\n');
+  // Strip every remaining tag.
+  s = s.replace(/<\/?[a-zA-Z][^>]*>/g, '');
+  // Decode the entities we care about. Order matters for &amp;.
+  s = s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&');
+  // Collapse whitespace runs. Keep newlines as a single \n separator.
+  s = s.replace(/[ \t\r\f\v]+/g, ' ').replace(/\s*\n\s*/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (s.length > ENRICH_BODY_CAP) s = s.slice(0, ENRICH_BODY_CAP);
+  return s;
 }
 
-export const processBatch =
-  (
-    clients: ProcessBatchClients,
-    store: ArticleStore,
-    vault: VaultFs,
-    concurrency: number = 4,
-  ): Phase<LibrarianCtx> =>
-  ({
-    name: 'process-batch',
-    async *run(ctx) {
-      const batch = requireCtx(ctx, 'batch', 'process-batch');
-      if (batch.length === 0) {
-        ctx.results = [];
-        return;
+interface FetchOutcome {
+  body: string;
+  enriched: boolean;
+  enrichError?: string;
+}
+
+async function fetchOneArticle(
+  url: string,
+  fallback: string,
+  outerSignal: AbortSignal | undefined,
+): Promise<FetchOutcome> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ENRICH_FETCH_TIMEOUT_MS);
+  const onOuterAbort = () => controller.abort();
+  if (outerSignal) {
+    if (outerSignal.aborted) controller.abort();
+    else outerSignal.addEventListener('abort', onOuterAbort, { once: true });
+  }
+  try {
+    const res = await globalThis.fetch(url, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: { 'user-agent': ENRICH_USER_AGENT, accept: 'text/html, text/plain;q=0.9, */*;q=0.5' },
+    });
+    if (!res.ok) {
+      return { body: fallback, enriched: false, enrichError: `http ${res.status}` };
+    }
+    const raw = await res.text();
+    const text = htmlToText(raw);
+    if (!text) return { body: fallback, enriched: false, enrichError: 'empty body' };
+    return { body: text, enriched: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { body: fallback, enriched: false, enrichError: msg.slice(0, 200) };
+  } finally {
+    clearTimeout(timeout);
+    if (outerSignal) outerSignal.removeEventListener('abort', onOuterAbort);
+  }
+}
+
+export const batchEnrich = (): Phase<LibrarianCtx> => ({
+  name: 'batch-enrich',
+  async *run(ctx) {
+    const batch = requireCtx(ctx, 'batch', 'batch-enrich');
+
+    const enriched: EnrichedArticle[] = new Array(batch.length);
+    let fetched = 0;
+    let skipped = 0;
+    let errors = 0;
+
+    // Pre-fill skips so the fanout only sees rows that actually need a GET.
+    type FetchSlot = { idx: number; articleId: number; url: string; fallback: string };
+    const slots: FetchSlot[] = [];
+    for (let i = 0; i < batch.length; i++) {
+      const a = batch[i]!;
+      const fallback = a.snippet ?? '';
+      if (!shouldFetch(a)) {
+        enriched[i] = { articleId: a.id, body: fallback, enriched: false };
+        skipped++;
+        continue;
       }
+      slots.push({ idx: i, articleId: a.id, url: a.url!, fallback });
+    }
 
-      // Build the upsert system prompt once (vault context shared across
-      // all per-article calls so vLLM prefix-cache hits).
-      const [taste, index] = await Promise.all([
-        vault.read('wiki/TASTE.md'),
-        vault.read('index.md'),
-      ]);
-      const upsertSystem = UPSERT_SYSTEM_TEMPLATE(taste, index);
-
-      // Each worker gets its own ToolRegistry so tool calls aren't cross-contaminated.
-      // The TRACKED vault tools snapshot pre-write state per path so we can
-      // roll back partial writes if post-call validation (ghost-paths,
-      // url-not-cited, truncation) fails. Returns both the registry and a
-      // tracker handle whose rollback() method restores the snapshots.
-      const buildRegistry = (): { registry: ToolRegistry; tracker: WriteTracker } => {
-        const reg = new ToolRegistry();
-        const tracker = registerVaultToolsTracked(reg, vault);
-        registerWebTools(reg);
-        return { registry: reg, tracker };
-      };
-
-      yield {
-        type: 'phase',
-        phase: 'process-batch',
-        detail: `${batch.length} articles, concurrency=${concurrency}`,
-      };
-
-      // mode: 'collect' lets the runner throw on backend errors (callUpsert
-      // network failure, vault permission denied, etc.) and returns a
-      // FanOutResult per article instead of rejecting the whole fanout.
-      //
-      // `signal` is passed straight into boundedFanout — thread-phase 1.2.1's
-      // soft-cancel semantics give us exactly what we want: on deadline
-      // abort the fanout (a) stops dispatching new items, (b) forwards the
-      // signal into the runner so in-flight LLM calls unwind via
-      // runAgentWithTools({signal}), and (c) returns a position-stable
-      // FanOutResult<ArticleResult>[] with synthetic AbortError slots for
-      // never-started items — no rejection, partial results pass through.
-      const fanoutResults = await boundedFanout({
-        items: batch,
-        concurrency,
+    if (slots.length > 0) {
+      const results = await boundedFanout({
+        items: slots,
+        concurrency: ENRICH_CONCURRENCY,
         mode: 'collect' as const,
         signal: ctx.signal,
-        runner: async (article, _i, signal): Promise<ArticleResult> => {
-          // Triage call. Signal forwarded into runAgentWithTools so an
-          // in-flight stream gets aborted on deadline; that throws an
-          // AbortError which the collect mode catches as a per-item error.
-          const triage = await callTriage(
-            clients.triageClient,
-            clients.triageModel,
-            article,
-            signal!,
-          );
-          if (!triage.keep) {
-            store.markSkipped(article.id, triage.reason);
-            return {
-              articleId: article.id,
-              outcome: 'skipped',
-              reason: triage.reason,
-              pagePaths: [],
-              logEntry: `[${new Date().toISOString().slice(0, 16).replace('T', ' ')}] ingest | skip — ${article.title.slice(0, 80)} (${triage.reason})`,
-              indexDeltas: [],
-            };
-          }
-
-          // Upsert call. Tracked tools snapshot pre-write state per path
-          // so we can roll back any partial writes on failure (truncation,
-          // ghost-paths, url-not-cited). Top-level try/catch routes all
-          // throws through tracker.rollback() before re-throwing — keeps
-          // the partial-write window minimal even for unexpected errors.
-          // Structured validation failures call tracker.rollback() inline
-          // at each failure branch.
-          const { registry, tracker } = buildRegistry();
-          let upsert: UpsertDecision;
-          try {
-            upsert = await callUpsert(
-              clients.upsertClient,
-              clients.upsertModel,
-              upsertSystem,
-              article,
-              registry,
-              signal!,
-            );
-          } catch (err) {
-            await tracker.rollback();
-            throw err; // bubbles to mode='collect'; post-loop marks failed
-          }
-
-          if (upsert.action === 'skipped') {
-            // Agent shouldn't have written anything when returning 'skipped',
-            // but if it did, those writes are stray. rollback is a no-op on
-            // a clean tracker.
-            await tracker.rollback();
-            store.markSkipped(article.id, upsert.reason);
-            return {
-              articleId: article.id,
-              outcome: 'skipped',
-              reason: upsert.reason,
-              pagePaths: [],
-              logEntry: upsert.logEntry,
-              indexDeltas: upsert.indexDeltas,
-            };
-          }
-
-          // Defensive validation: smaller models confabulate "I created
-          // page X" without actually calling vault_write. Verify every
-          // claimed path actually exists on disk before recording done.
-          // Validation failures stay structured (not thrown) — they are
-          // semantic outcomes, not exceptions.
-          const validatedPaths: string[] = [];
-          const ghostPaths: string[] = [];
-          for (const p of upsert.paths) {
-            if (await vault.exists(p)) {
-              validatedPaths.push(p);
-            } else {
-              ghostPaths.push(p);
-            }
-          }
-          if (ghostPaths.length > 0) {
-            await tracker.rollback();
-            const reason = `agent claimed paths that don't exist: ${ghostPaths.slice(0, 3).join(', ')}${ghostPaths.length > 3 ? '…' : ''}`;
-            store.markFailed(article.id, reason);
-            return {
-              articleId: article.id,
-              outcome: 'failed',
-              reason,
-              pagePaths: [],
-              // Drop the agent's logEntry/indexDeltas — they reference
-              // the ghost paths.
-              indexDeltas: [],
-            };
-          }
-          if (validatedPaths.length === 0) {
-            await tracker.rollback();
-            const reason = `action='${upsert.action}' but paths[] empty`;
-            store.markFailed(article.id, reason);
-            return {
-              articleId: article.id,
-              outcome: 'failed',
-              reason,
-              pagePaths: [],
-              indexDeltas: [],
-            };
-          }
-
-          // Source-URL enforcement: the prompt requires every page to cite
-          // this article's URL in its ## Sources section. Same belt-and-
-          // suspenders pattern as ghost-paths — small models sometimes
-          // claim "I added the source" without actually writing the URL.
-          // Skip when the article had no URL to cite (bare DOI, RSS-only
-          // entries with empty url field).
-          if (article.url) {
-            const pagesWithoutUrl: string[] = [];
-            for (const p of validatedPaths) {
-              const text = await vault.read(p);
-              if (!text.includes(article.url)) {
-                pagesWithoutUrl.push(p);
-              }
-            }
-            if (pagesWithoutUrl.length > 0) {
-              await tracker.rollback();
-              const reason = `agent wrote pages without citing the source URL: ${pagesWithoutUrl.slice(0, 3).join(', ')}${pagesWithoutUrl.length > 3 ? '…' : ''}`;
-              store.markFailed(article.id, reason);
-              return {
-                articleId: article.id,
-                outcome: 'failed',
-                reason,
-                pagePaths: [],
-                indexDeltas: [],
-              };
-            }
-          }
-
-          store.markDone(article.id, validatedPaths);
-          return {
-            articleId: article.id,
-            outcome: 'done',
-            pagePaths: validatedPaths,
-            logEntry: upsert.logEntry,
-            indexDeltas: upsert.indexDeltas,
+        runner: async (slot, _i, signal) => fetchOneArticle(slot.url, slot.fallback, signal),
+      });
+      for (let j = 0; j < slots.length; j++) {
+        const slot = slots[j]!;
+        const r = results[j]!;
+        if (r.ok) {
+          const o = r.value;
+          enriched[slot.idx] = {
+            articleId: slot.articleId,
+            body: o.body,
+            enriched: o.enriched,
+            ...(o.enrichError ? { enrichError: o.enrichError } : {}),
           };
+          if (o.enriched) fetched++;
+          else errors++;
+        } else {
+          // boundedFanout cancelled this slot (e.g. ctx.signal aborted before dispatch).
+          enriched[slot.idx] = {
+            articleId: slot.articleId,
+            body: slot.fallback,
+            enriched: false,
+            enrichError: r.error.message.slice(0, 200),
+          };
+          errors++;
+        }
+      }
+    }
+
+    ctx.enriched = enriched;
+    yield {
+      type: 'phase',
+      phase: 'batch-enrich',
+      detail: `${enriched.length} article(s); ${fetched} fetched / ${skipped} skipped${errors > 0 ? ' / ' + errors + ' errors' : ''}`,
+      counts: { articles: enriched.length, fetched, skipped, errors },
+    };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// batchExtractRefs — pure-CPU fan-out applying refs.ts to each article body.
+// ---------------------------------------------------------------------------
+
+export const batchExtractRefs = (): Phase<LibrarianCtx> => ({
+  name: 'batch-extract-refs',
+  async *run(ctx) {
+    const enriched = requireCtx(ctx, 'enriched', 'batch-extract-refs');
+    const refs: ExtractedRefs[] = enriched.map((e) => ({
+      articleId: e.articleId,
+      arxivIds: extractArxivIds(e.body),
+      dois: extractDois(e.body),
+    }));
+    ctx.refs = refs;
+    const totalRefs = refs.reduce((acc, r) => acc + r.arxivIds.length + r.dois.length, 0);
+    yield {
+      type: 'phase',
+      phase: 'batch-extract-refs',
+      detail: `${refs.length} article(s) / ${totalRefs} ref(s) extracted`,
+      counts: { articles: refs.length, refs: totalRefs },
+    };
+  },
+});
+
+
+// ---------------------------------------------------------------------------
+// perArticleTree (v3) — bounded-concurrency fan-out across the batch. Each
+// per-article runner does:
+//   1. Idempotency check (skip if URL missing or source page already exists).
+//   2. Router — one no-tool LLM call writing per-scope task instructions.
+//   3. Fan-out (Promise.all) of four scouts:
+//      topicScout / sourceScout / entityScout / citeTracker. Each is a
+//      tool-using LLM call that explores one slice of the vault.
+//   4. Reviewer — sequential LLM call with vault_read; recommends final
+//      topics, cites, related sources, and entities.
+//   5. Reconcile + gate — deterministic check: fold false-new topics, drop
+//      hallucinations, gate new-topic creation by near-duplicate +
+//      definition-substantiveness.
+//   6. Summary — fast no-tool LLM call to write 2-3 paragraph prose.
+//   7. Deterministic writes — source page, topic-page touches, backlinks.
+//
+// Per-article rollback: a small in-runner write log captures pre-write
+// state for every vault.write call so a throw mid-runner doesn't leave a
+// half-written article. Same shape as the v1 WriteTracker but inline since
+// no agent has vault_write here (only the librarian's own deterministic
+// step writes).
+// ---------------------------------------------------------------------------
+
+import { callSummary, type Summarizer } from './write-source-one.js';
+import { runRouter, type RouterRunner } from './librarian-router.js';
+import { runTopicScout, type TopicScoutRunner } from './scouts/topic-scout.js';
+import { runSourceScout, type SourceScoutRunner } from './scouts/source-scout.js';
+import { runEntityScout, type EntityScoutRunner } from './scouts/entity-scout.js';
+import { runCiteTracker, type CiteTrackerRunner } from './scouts/cite-tracker.js';
+import {
+  applyReconcileAndGate,
+  runReviewer,
+  type ReviewerRunner,
+} from './reviewer.js';
+import { formatSourcePage } from './page-templates.js';
+
+export interface PerArticleClients {
+  /** Tool-capable model used by router + 4 scouts + reviewer. */
+  toolsClient: OpenAI;
+  toolsModel: string;
+  /** Fast model for the per-article summary call. */
+  summaryClient: OpenAI;
+  summaryModel: string;
+}
+
+/** Optional DI overrides for testing. All default to the real implementations. */
+export interface PerArticleDeps {
+  router?: RouterRunner;
+  topicScout?: TopicScoutRunner;
+  sourceScout?: SourceScoutRunner;
+  entityScout?: EntityScoutRunner;
+  citeTracker?: CiteTrackerRunner;
+  reviewer?: ReviewerRunner;
+  summarizer?: Summarizer;
+}
+
+const PER_ARTICLE_CONCURRENCY = 4;
+
+/** Per-runner write log: tracks pre-state so a throw can roll back atomically. */
+function makeWriter(vault: VaultFs): {
+  write: (path: string, content: string) => Promise<void>;
+  rollback: () => Promise<void>;
+  written: () => string[];
+} {
+  const before = new Map<string, string | null>();
+  const writtenInOrder: string[] = [];
+  return {
+    async write(path, content) {
+      if (!before.has(path)) {
+        const existed = await vault.exists(path);
+        before.set(path, existed ? await vault.read(path) : null);
+      }
+      await vault.write(path, content);
+      writtenInOrder.push(path);
+    },
+    async rollback() {
+      // Reverse order so dependent writes undo cleanly.
+      for (const path of [...writtenInOrder].reverse()) {
+        const prior = before.get(path);
+        if (prior === null) {
+          try {
+            await vault.unlink(path);
+          } catch {
+            // already gone or never created; ignore
+          }
+        } else if (prior !== undefined) {
+          await vault.write(path, prior);
+        }
+      }
+    },
+    written() {
+      return [...writtenInOrder];
+    },
+  };
+}
+
+export const perArticleTree =
+  (
+    clients: PerArticleClients,
+    vault: VaultFs,
+    store: ArticleStore,
+    deps: PerArticleDeps = {},
+  ): Phase<LibrarianCtx> => ({
+    name: 'per-article-tree',
+    async *run(ctx) {
+      const batch = requireCtx(ctx, 'batch', 'per-article-tree');
+      const enriched = requireCtx(ctx, 'enriched', 'per-article-tree');
+      const refs = requireCtx(ctx, 'refs', 'per-article-tree');
+
+      const enrichedById = new Map(enriched.map((e) => [e.articleId, e]));
+      const refsById = new Map(refs.map((r) => [r.articleId, r]));
+
+      const router = deps.router ?? runRouter;
+      const topicScout = deps.topicScout ?? runTopicScout;
+      const sourceScout = deps.sourceScout ?? runSourceScout;
+      const entityScout = deps.entityScout ?? runEntityScout;
+      const citeTracker = deps.citeTracker ?? runCiteTracker;
+      const reviewer = deps.reviewer ?? runReviewer;
+      const summarizer = deps.summarizer ?? callSummary;
+
+      const toolsClients = { client: clients.toolsClient, model: clients.toolsModel };
+
+      const fanoutResults = await boundedFanout({
+        items: batch,
+        concurrency: PER_ARTICLE_CONCURRENCY,
+        mode: 'collect' as const,
+        signal: ctx.signal,
+        runner: async (article, _idx, parentSignal): Promise<ArticleResult> => {
+          // 1. Idempotency.
+          const sid = stableIdForUrl(article.url ?? '');
+          if (!sid) {
+            store.markSkipped(article.id, 'no-url-no-stable-id');
+            return {
+              articleId: article.id,
+              outcome: 'skipped',
+              reason: 'no-url-no-stable-id',
+              topicPagePaths: [],
+              backlinkPagePaths: [],
+            };
+          }
+          const sourceFilename = stableIdToFilename(sid);
+          const sourcePath = `wiki/sources/${sourceFilename}.md`;
+          if (await vault.exists(sourcePath)) {
+            store.markSkipped(article.id, 'already-ingested');
+            return {
+              articleId: article.id,
+              outcome: 'skipped',
+              reason: 'already-ingested',
+              topicPagePaths: [],
+              backlinkPagePaths: [],
+            };
+          }
+
+          // Per-article child AbortController. Two purposes:
+          //   - Scope cleanup: the child is GC'd when the runner returns,
+          //     so any listeners the SDK attached to the child signal
+          //     (one per fetch + retries inside each runAgentWithTools
+          //     sub-call) go with it. ctx.signal accumulates only the
+          //     parent listener registered below — at most one per
+          //     concurrent runner, well under the default cap.
+          //   - Listener-cap suppression: each runner has 7 LLM sub-
+          //     calls (router + 4 scouts + reviewer + summary), each of
+          //     which can register multiple listeners on its signal as
+          //     it iterates tool rounds. The cumulative count per
+          //     CHILD signal can exceed Node's default 10-listener cap
+          //     during the runner's lifetime — not an actual leak, just
+          //     transient. Bumping the child's cap silences the
+          //     spurious warning without raising it on ctx.signal.
+          const childCtrl = new AbortController();
+          setMaxListeners(50, childCtrl.signal);
+          const onParentAbort = (): void => {
+            childCtrl.abort(parentSignal?.reason);
+          };
+          if (parentSignal?.aborted) {
+            childCtrl.abort(parentSignal.reason);
+          } else if (parentSignal) {
+            parentSignal.addEventListener('abort', onParentAbort, { once: true });
+          }
+          const signal = childCtrl.signal;
+          const releaseParentListener = (): void => {
+            if (parentSignal && !parentSignal.aborted) {
+              parentSignal.removeEventListener('abort', onParentAbort);
+            }
+          };
+
+          const body = enrichedById.get(article.id)?.body ?? article.snippet ?? '';
+          const articleRefs = refsById.get(article.id) ?? {
+            articleId: article.id,
+            arxivIds: [],
+            dois: [],
+          };
+
+          const writer = makeWriter(vault);
+          try {
+            // 2. Router.
+            const routerOut = await router(
+              { article, body, refs: articleRefs },
+              toolsClients,
+              signal,
+            );
+
+            // 3. Fan-out scouts in parallel.
+            const [topicOut, sourceOut, entityOut, citeOut] = await Promise.all([
+              topicScout(
+                { article, body, task: routerOut.topicScoutTask },
+                toolsClients,
+                vault,
+                signal,
+              ),
+              sourceScout(
+                { article, body, task: routerOut.sourceScoutTask },
+                toolsClients,
+                vault,
+                store,
+                signal,
+              ),
+              entityScout(
+                { article, body, task: routerOut.entityScoutTask },
+                toolsClients,
+                vault,
+                signal,
+              ),
+              citeTracker(
+                { article, body, refs: articleRefs, task: routerOut.citeTrackerTask },
+                toolsClients,
+                vault,
+                store,
+                signal,
+              ),
+            ]);
+
+            // 4. Reviewer.
+            const reviewerOut = await reviewer(
+              {
+                article,
+                body,
+                topicScout: topicOut,
+                sourceScout: sourceOut,
+                entityScout: entityOut,
+                citeTracker: citeOut,
+              },
+              toolsClients,
+              vault,
+              signal,
+            );
+
+            // 5. Reconcile + gate.
+            const topicPaths = await vault.list('wiki/topics/*.md');
+            const existingTopicSlugs = new Set(
+              topicPaths.map((p) => basename(p, '.md')),
+            );
+            const gated = await applyReconcileAndGate({
+              reviewer: reviewerOut,
+              existingTopicSlugs,
+              sourceExists: (filename) => vault.exists(`wiki/sources/${filename}.md`),
+              entityExists: (slug) => vault.exists(`wiki/entities/${slug}.md`),
+            });
+
+            // 6. Summary. Truncation throws → caught by outer try; rollback.
+            const summary = await summarizer(
+              {
+                article,
+                body,
+                topics: gated.existingTopicSlugs,
+                cites: gated.citeFilenames,
+              },
+              { client: clients.summaryClient, model: clients.summaryModel },
+              signal,
+            );
+
+            // 7. Deterministic writes.
+            const memberEntry = {
+              filename: sourceFilename,
+              title: article.title,
+              collected: article.collectedAt,
+            };
+
+            // 7a. Source page.
+            const sourceContent = formatSourcePage({
+              stableId: sid,
+              url: article.url ?? '',
+              arxivId: sid.kind === 'arxiv' ? sid.id : undefined,
+              doi: sid.kind === 'doi' ? sid.doi : undefined,
+              sourceName: article.source,
+              collected: article.collectedAt,
+              title: article.title,
+              field: article.field,
+              topics: gated.existingTopicSlugs,
+              cites: gated.citeFilenames,
+              summary,
+            });
+            await writer.write(sourcePath, sourceContent);
+
+            // 7b. Topic-page touches: existing → appendMemberSource, new → create.
+            const topicPagePaths: string[] = [];
+            const newTopicsBySlug = new Map(
+              gated.newTopicsToCreate.map((t) => [t.slug, t.definition]),
+            );
+            for (const slug of gated.existingTopicSlugs) {
+              if (slug === 'uncategorized') continue;
+              const topicPath = `wiki/topics/${slug}.md`;
+              const newDef = newTopicsBySlug.get(slug);
+              if (newDef && !(await vault.exists(topicPath))) {
+                const content = formatTopicPage({
+                  slug,
+                  created: new Date(),
+                  updated: new Date(),
+                  definition: newDef,
+                  members: [memberEntry],
+                  relatedTopics: [],
+                });
+                await writer.write(topicPath, content);
+              } else if (await vault.exists(topicPath)) {
+                const existing = await vault.read(topicPath);
+                const updated = appendMemberSource(existing, memberEntry);
+                if (updated !== existing) await writer.write(topicPath, updated);
+              } else {
+                continue; // existing-topic slug but page absent; skip
+              }
+              topicPagePaths.push(topicPath);
+            }
+
+            // 7c. Backlinks: cited source pages + entity pages.
+            const backlinkPagePaths: string[] = [];
+            const backlinkOn = async (path: string): Promise<void> => {
+              if (!(await vault.exists(path))) return;
+              const existing = await vault.read(path);
+              const updated = appendCitedBy(existing, {
+                filename: sourceFilename,
+                title: article.title,
+              });
+              if (updated !== existing) {
+                await writer.write(path, updated);
+                backlinkPagePaths.push(path);
+              }
+            };
+            for (const citeFilename of gated.citeFilenames) {
+              await backlinkOn(`wiki/sources/${citeFilename}.md`);
+            }
+            for (const entitySlug of gated.entitySlugs) {
+              await backlinkOn(`wiki/entities/${entitySlug}.md`);
+            }
+
+            // 8. markDone with the full audit trail.
+            const allPaths = [sourcePath, ...topicPagePaths, ...backlinkPagePaths];
+            store.markDone(article.id, allPaths);
+
+            const ts = new Date().toISOString().slice(0, 16).replace('T', ' ');
+            const slugSummary = gated.existingTopicSlugs.join(', ') || '(no topics)';
+            const gateNote =
+              gated.gateStats.foldedSlugs +
+                gated.gateStats.droppedHallucinations +
+                gated.gateStats.rejectedNearDuplicates +
+                gated.gateStats.rejectedThinDefinition >
+              0
+                ? ` [gate: fold=${gated.gateStats.foldedSlugs} drop=${gated.gateStats.droppedHallucinations} dup=${gated.gateStats.rejectedNearDuplicates} thin=${gated.gateStats.rejectedThinDefinition}]`
+                : '';
+            return {
+              articleId: article.id,
+              outcome: 'done',
+              sourcePagePath: sourcePath,
+              topicPagePaths,
+              backlinkPagePaths,
+              logEntry: `[${ts}] ingest-v3 | ${article.title.slice(0, 80)} → ${slugSummary}${gateNote}`,
+            };
+          } catch (err) {
+            // Roll back any partial writes before re-throwing into the
+            // boundedFanout's collect mode.
+            await writer.rollback();
+            throw err;
+          } finally {
+            releaseParentListener();
+          }
         },
       });
 
-      // Map FanOutResult<ArticleResult>[] → ArticleResult[] AND reconcile
-      // ArticleStore FSM for failure slots. Three cases:
-      //   - r.ok=true: runner already did markDone/markSkipped/markFailed
-      //     on its way to returning. Pass the value through.
-      //   - r.ok=false, AbortError: covers both an in-flight runner that
-      //     observed the forwarded signal and threw mid-LLM, AND
-      //     never-started slots that boundedFanout filled synthetically
-      //     after deadline (1.2.1 soft-cancel). markPending is idempotent
-      //     in either case — the row goes back into the queue for the
-      //     next run.
-      //   - r.ok=false, other error: real backend failure (network, vault
-      //     I/O, JSON parse). markFailed records the reason; the row is
-      //     reapable later if the underlying issue is transient.
-      const results: ArticleResult[] = fanoutResults.map((r, i) => {
+      // Map FanOutResult<ArticleResult>[] → ArticleResult[]. Synthetic
+      // AbortError on a per-article runner = soft deadline rolled it over.
+      ctx.results = fanoutResults.map((r, i) => {
         if (r.ok) return r.value;
-        const article = batch[i]!;
+        const a = batch[i]!;
         if (r.error.name === 'AbortError') {
-          store.markPending(article.id);
+          store.markPending(a.id);
           return {
-            articleId: article.id,
+            articleId: a.id,
             outcome: 'skipped',
             reason: 'deadline-rolled-over',
-            pagePaths: [],
-            indexDeltas: [],
+            topicPagePaths: [],
+            backlinkPagePaths: [],
           };
         }
-        store.markFailed(article.id, r.error.message.slice(0, 200));
+        store.markFailed(a.id, r.error.message.slice(0, 200));
         return {
-          articleId: article.id,
+          articleId: a.id,
           outcome: 'failed',
           reason: r.error.message.slice(0, 200),
-          pagePaths: [],
-          indexDeltas: [],
+          topicPagePaths: [],
+          backlinkPagePaths: [],
         };
       });
 
-      ctx.results = results;
-
-      const tally = results.reduce(
-        (acc, r) => {
-          acc[r.outcome] = (acc[r.outcome] ?? 0) + 1;
-          return acc;
-        },
+      const tally = ctx.results.reduce(
+        (acc, r) => { acc[r.outcome] = (acc[r.outcome] ?? 0) + 1; return acc; },
         { done: 0, skipped: 0, failed: 0 } as Record<string, number>,
       );
       yield {
         type: 'phase',
-        phase: 'process-batch',
+        phase: 'per-article-tree',
         detail: `done=${tally.done} skipped=${tally.skipped} failed=${tally.failed}`,
         counts: tally,
       };
     },
   });
 
-interface TriageDecision {
-  keep: boolean;
-  reason: string;
-}
-
-async function callTriage(
-  client: OpenAI,
-  model: string,
-  article: ArticleRow,
-  signal: AbortSignal,
-): Promise<TriageDecision> {
-  const r = await runAgentWithTools(
-    {
-      name: 'triage',
-      systemPrompt: TRIAGE_SYSTEM,
-      model,
-      tools: [],
-      maxToolRounds: 1,
-      // gemma4:e4b reasons by default and we can't disable it; ~150-300 tokens
-      // of reasoning trace before the JSON output. 800 leaves headroom.
-      maxTokens: 800,
-    },
-    [
-      {
-        role: 'user',
-        content: `Title: ${article.title}\nField: ${article.field ?? '(none)'}\nURL: ${article.url ?? '(empty)'}\n${article.snippet ? `Snippet: ${article.snippet.slice(0, 400)}` : 'Snippet: (none)'}`,
-      },
-    ],
-    {
-      client,
-      toolExecutor: { execute: async () => ({ toolCallId: '', content: '' }) },
-      signal,
-    },
-  );
-  return parseJSON<TriageDecision>(r.text, { keep: false, reason: 'parse-failed' });
-}
-
-interface UpsertDecision {
-  action: 'created' | 'updated' | 'skipped';
-  reason: string;
-  paths: string[];
-  logEntry?: string;
-  indexDeltas: string[];
-}
-
-async function callUpsert(
-  client: OpenAI,
-  model: string,
-  systemPrompt: string,
-  article: ArticleRow,
-  registry: ToolRegistry,
-  signal: AbortSignal,
-): Promise<UpsertDecision> {
-  const r = await runAgentWithTools(
-    {
-      name: 'upsert',
-      systemPrompt,
-      model,
-      tools: registry.definitions(),
-      maxToolRounds: 8,
-      maxTokens: 4000,
-      // Reasoning ON for upsert — the writer benefits from thinking through
-      // page structure and cross-references before writing.
-    },
-    [
-      {
-        role: 'user',
-        content:
-          `Article to consider:\n` +
-          `Title: ${article.title}\n` +
-          `URL: ${article.url ?? '(empty)'}\n` +
-          `Source: ${article.source ?? '(unknown)'}\n` +
-          `Collected: ${article.collectedAt.toISOString().slice(0, 10)}\n` +
-          `Field: ${article.field ?? '(unknown)'}\n` +
-          `Snippet: ${article.snippet ?? '(none)'}\n\n` +
-          `Decide. If you write pages, return the structured JSON described in your instructions.`,
-      },
-    ],
-    { client, toolExecutor: registry, cache: undefined, signal },
-  );
-  // Truncation detection: when the model hits maxTokens before finishing its
-  // structured output, finishReason is 'length' and the JSON it claims to
-  // have written is partial/parseable-but-wrong. Worse, by the time we get
-  // here the agent has typically already vault_write'd one or more pages
-  // mid-thought. Throw so processBatch's mode='collect' captures it as a
-  // per-item failure (and, paired with the rollback tracker, undoes any
-  // partial writes the truncated agent landed on disk).
-  if (r.finishReason === 'length') {
-    throw new Error(
-      `upsert truncated: model hit maxTokens=4000 before finishing. Pages ` +
-        `the agent wrote during this call may be incomplete; see rollback.`,
-    );
-  }
-  const fallback: UpsertDecision = { action: 'skipped', reason: 'parse-failed', paths: [], indexDeltas: [] };
-  const parsed = parseJSON<Partial<UpsertDecision>>(r.text, fallback);
-  return {
-    action: parsed.action ?? 'skipped',
-    reason: parsed.reason ?? 'no reason given',
-    paths: parsed.paths ?? [],
-    logEntry: parsed.logEntry,
-    indexDeltas: parsed.indexDeltas ?? [],
-  };
-}
-
 // ---------------------------------------------------------------------------
-// mergeMetadata — append log entries, append index deltas
+// mergeMetadata — append per-article logEntries to log.md. index.md is not
+// maintained per-article (separate lint).
 // ---------------------------------------------------------------------------
 
 export const mergeMetadata = (vault: VaultFs): Phase<LibrarianCtx> => ({
   name: 'merge-metadata',
   async *run(ctx) {
     const results = requireCtx(ctx, 'results', 'merge-metadata');
-    const logEntries = results
-      .map((r) => r.logEntry)
-      .filter((e): e is string => Boolean(e));
-    const indexDeltas = results.flatMap((r) => r.indexDeltas);
-
+    const logEntries = results.map((r) => r.logEntry).filter((e): e is string => Boolean(e));
     if (logEntries.length > 0) {
       const block = logEntries.map((e) => `## ${e.replace(/^## ?/, '')}`).join('\n\n');
       await vault.append('log.md', '\n' + block + '\n');
     }
-
-    if (indexDeltas.length > 0) {
-      // Naive: append to the bottom of index.md. The midnight vault-daily-lint
-      // job (still on Hermes) re-sorts and dedupes — we don't try to be smart
-      // about placement here.
-      const block = indexDeltas.map((d) => `${d}`).join('\n');
-      await vault.append('index.md', '\n' + block + '\n');
-    }
-
     yield {
       type: 'phase',
       phase: 'merge-metadata',
-      detail: `${logEntries.length} log entries, ${indexDeltas.length} index deltas`,
-      counts: { log: logEntries.length, index: indexDeltas.length },
+      detail: `${logEntries.length} log entries`,
+      counts: { log: logEntries.length },
     };
   },
 });
 
 // ---------------------------------------------------------------------------
-// commitLocal — single local commit per run, no push
+// commitLocal — single local commit per run, scoped to source/topic/log paths.
 // ---------------------------------------------------------------------------
 
 export const commitLocal = (git: GitOps): Phase<LibrarianCtx> => ({
@@ -555,31 +713,18 @@ export const commitLocal = (git: GitOps): Phase<LibrarianCtx> => ({
   async *run(ctx) {
     const results = requireCtx(ctx, 'results', 'commit-local');
     const tally = results.reduce(
-      (acc, r) => {
-        acc[r.outcome] = (acc[r.outcome] ?? 0) + 1;
-        return acc;
-      },
+      (acc, r) => { acc[r.outcome] = (acc[r.outcome] ?? 0) + 1; return acc; },
       { done: 0, skipped: 0, failed: 0 } as Record<string, number>,
     );
     const message = `ingest: ${results.length} articles (${tally.done} done, ${tally.skipped} skipped, ${tally.failed} failed)`;
-    // Only commit librarian-owned outputs. Excludes the sqlite db (gitignored
-    // anyway), excludes freshly-collected matcha files (intake's job),
-    // excludes raw/inbox/migrated/* (one-time migration is its own concern).
-    const result = await git.commit(message, ['log.md', 'index.md', 'wiki/']);
-    if (result.committed) {
-      yield {
-        type: 'agent_activity',
-        agent: 'commit-local',
-        action: 'committed',
-        detail: `${result.sha?.slice(0, 7)} — ${message}`,
-      };
-    } else {
-      yield {
-        type: 'agent_activity',
-        agent: 'commit-local',
-        action: 'noop',
-        detail: 'no changes to commit',
-      };
-    }
+    const result = await git.commit(message, ['log.md', 'wiki/sources/', 'wiki/topics/']);
+    yield {
+      type: 'agent_activity',
+      agent: 'commit-local',
+      action: result.committed ? 'committed' : 'noop',
+      detail: result.committed
+        ? `${result.sha?.slice(0, 7)} — ${message}`
+        : 'no changes to commit',
+    };
   },
 });

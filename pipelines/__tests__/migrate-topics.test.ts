@@ -6,7 +6,7 @@ import {
   planCollisions,
   clustersFromOldPath,
   foldLosersIntoWinner,
-} from '../scripts/migrate-topics-v2.js';
+} from '../scripts/migrate-topics.js';
 
 describe('extractDefinition', () => {
   it('extracts the first paragraph after the H1, before any ## heading', () => {

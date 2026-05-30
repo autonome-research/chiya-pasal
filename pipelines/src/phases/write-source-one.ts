@@ -1,10 +1,11 @@
 /**
- * writeSourceOne — per-article source-page writer for the v2 librarian.
+ * callSummary + writeSourceOne — summary LLM call and (legacy) one-shot
+ * source-page writer.
  *
- * One of four per-article steps in the v2 fan-out (review-library →
- * write-source → update-topics → update-backlinks). The function is
- * deliberately NOT a Phase: it returns a single page write so the
- * surrounding fan-out runner can compose it with the other three steps.
+ * The live librarian only consumes callSummary (the per-article fan-out
+ * inlines its own write step). writeSourceOne is kept as a self-contained
+ * convenience for one-off scripts and tests; both share the same idempotent
+ * stable-id check.
  *
  * Two no-op return paths (both null):
  *   - article has no URL → can't form a stable id; caller skips.
@@ -24,10 +25,9 @@ export interface WriteSourceOneInput {
   article: ArticleRow;
   /** Enriched body from batchEnrich (or just the snippet if no fetch). */
   body: string;
-  /** Topic slugs assigned by batchClassifyArticles (already reconciled). */
+  /** Final topic slugs (already reconciled against the existing inventory). */
   topics: string[];
-  /** Stable filenames of cited references that resolved in ArticleStore.
-   *  Set by reviewLibraryOne; pass-through here. */
+  /** Stable filenames of cited references that resolved in ArticleStore. */
   cites: string[];
 }
 

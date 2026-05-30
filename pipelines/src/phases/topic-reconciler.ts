@@ -1,8 +1,6 @@
 /**
- * topic-reconciler — deterministic post-validation for any LLM output that
- * proposes topic memberships + new topics. Used by both:
- *   - the legacy v2 batch classifier (classify-prompt.ts), and
- *   - the v3 reviewer agent (reviewer.ts).
+ * topic-reconciler — deterministic post-validation for the reviewer's
+ * topic-membership output (reviewer.ts).
  *
  * Two invariants the LLM doesn't reliably maintain:
  *
@@ -17,7 +15,7 @@
  */
 
 export interface TopicDecision {
-  /** Article identifier — index in the batch (v2) or article id (v3). */
+  /** Article identifier. */
   i: number;
   topics: string[];
 }

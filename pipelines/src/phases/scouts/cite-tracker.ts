@@ -16,7 +16,7 @@ import { parseJSON, runAgentWithTools, ToolRegistry } from 'thread-phase';
 import type OpenAI from 'openai';
 
 import type { ArticleRow, ArticleStore } from '../../shared/article-store.js';
-import type { ExtractedRefs } from '../../shared/librarian-v2-types.js';
+import type { ExtractedRefs } from '../../shared/librarian-types.js';
 import { registerArticleLookupTools } from '../../tools/article-lookup.js';
 import { registerReadOnlyVaultTools, type VaultFs } from '../../tools/vault.js';
 import { stableIdForUrl, stableIdToFilename } from '../page-templates.js';

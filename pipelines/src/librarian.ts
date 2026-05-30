@@ -1,15 +1,12 @@
 /**
- * Librarian pipeline entry point.
+ * Librarian entry point. The librarian drains pending articles from the
+ * ArticleStore, runs each through router → 4 parallel scouts → reviewer →
+ * deterministic write, and emits source/topic/backlink pages into the vault.
  *
  * Usage: tsx src/librarian.ts [--batch=N] [--minutes=M]
  *
- * Defaults: batch=20 articles, soft deadline of 25 minutes.
- *
- * One run drains up to `batch` pending rows from the ArticleStore. Beyond
- * the deadline, new articles aren't started — in-flight ones complete or
- * the worker rolls them back to pending. Crash recovery: stuck 'processing'
- * rows older than 60 min are flipped back to pending at the start of every
- * run.
+ * Defaults: batch=10 articles, soft deadline of 8 minutes (matches the
+ * systemd timer cadence).
  */
 
 import {
@@ -24,11 +21,13 @@ import { loadChiyaEnv, type InferenceTarget } from './shared/env.js';
 import { GitOps } from './tools/git.js';
 import { VaultFs } from './tools/vault.js';
 import {
-  commitLocal,
-  loadBatch,
-  mergeMetadata,
-  processBatch,
   reapStale,
+  loadBatch,
+  batchEnrich,
+  batchExtractRefs,
+  perArticleTree,
+  mergeMetadata,
+  commitLocal,
 } from './phases/librarian-phases.js';
 import type { LibrarianCtx } from './shared/librarian-types.js';
 
@@ -38,8 +37,8 @@ interface Args {
 }
 
 function parseArgs(): Args {
-  let batchSize = 20;
-  let minutes = 25;
+  let batchSize = 10;
+  let minutes = 8;
   for (const arg of process.argv.slice(2)) {
     const m = /^--(batch|minutes)=(\d+)$/.exec(arg);
     if (!m) continue;
@@ -60,39 +59,20 @@ async function main(): Promise<void> {
 
   console.log(
     `[librarian] vault=${env.vaultDir} db=${dbPath} batch=${batchSize} minutes=${minutes}\n` +
-      `           triage: ${env.fast.baseUrl}/${env.fast.model}\n` +
-      `           upsert: ${env.tools.baseUrl}/${env.tools.model}`,
+      `            tools:   ${env.tools.baseUrl}/${env.tools.model}\n` +
+      `            summary: ${env.fast.baseUrl}/${env.fast.model}`,
   );
 
   const vault = new VaultFs(env.vaultDir);
-  const git = new GitOps({ vaultDir: env.vaultDir, remote: env.vaultRemote, branch: env.vaultBranch });
+  const git = new GitOps({
+    vaultDir: env.vaultDir,
+    remote: env.vaultRemote,
+    branch: env.vaultBranch,
+  });
   const store = new ArticleStore(dbPath);
   const jobStore = new SqliteJobStore(dbPath);
   const runner = new JobRunner(jobStore);
 
-  // Triage runs on the fast no-tool model (mb:8005).
-  // Upsert runs locally — only target with --enable-auto-tool-choice.
-  const phases = [
-    reapStale(store),
-    loadBatch(store),
-    processBatch(
-      {
-        triageClient: clientFor(env.fast),
-        triageModel: env.fast.model,
-        upsertClient: clientFor(env.tools),
-        upsertModel: env.tools.model,
-      },
-      store,
-      vault,
-    ),
-    mergeMetadata(vault),
-    commitLocal(git),
-  ];
-
-  // Wall-clock deadline as an AbortSignal: forwarded through processBatch
-  // into runAgentWithTools so in-flight LLM calls unwind on abort, instead
-  // of being checked once per runner invocation (the old deadlineAt
-  // approach, which couldn't interrupt a 60-90s upsert mid-call).
   const deadlineController = new AbortController();
   const deadlineTimer = setTimeout(
     () => deadlineController.abort('deadline-reached'),
@@ -105,13 +85,30 @@ async function main(): Promise<void> {
     signal: deadlineController.signal,
   };
 
-  // acquireExclusive: refuse to start a second librarian if one is already
-  // RUNNING under this name. The 10-minute systemd cadence + 25-minute soft
-  // deadline means overlap is plausible; without this, two runs could both
-  // pull the same pending rows from ArticleStore and double-process them.
+  // Tools tier (gemma4:26b) for router + scouts + reviewer; fast tier
+  // (gemma4:e4b) for the per-article summary call.
+  const phases = [
+    reapStale(store),
+    loadBatch(store),
+    batchEnrich(),
+    batchExtractRefs(),
+    perArticleTree(
+      {
+        toolsClient: clientFor(env.tools),
+        toolsModel: env.tools.model,
+        summaryClient: clientFor(env.fast),
+        summaryModel: env.fast.model,
+      },
+      vault,
+      store,
+    ),
+    mergeMetadata(vault),
+    commitLocal(git),
+  ];
+
   const jobId = jobStore.acquireExclusive('chiya-librarian', { batchSize, minutes });
   if (!jobId) {
-    console.log('[librarian] another run is already in flight — exiting cleanly');
+    console.log('[librarian] another run already in flight — exiting cleanly');
     clearTimeout(deadlineTimer);
     store.close();
     jobStore.close();

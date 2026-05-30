@@ -13,7 +13,7 @@ import { parseJSON, runAgentWithTools } from 'thread-phase';
 import type OpenAI from 'openai';
 
 import type { ArticleRow } from '../shared/article-store.js';
-import type { ExtractedRefs } from '../shared/librarian-v2-types.js';
+import type { ExtractedRefs } from '../shared/librarian-types.js';
 
 export interface RouterInput {
   article: ArticleRow;
