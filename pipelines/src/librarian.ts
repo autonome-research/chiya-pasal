@@ -18,6 +18,7 @@ import OpenAI from 'openai';
 
 import { ArticleStore } from './shared/article-store.js';
 import { loadChiyaEnv, type InferenceTarget } from './shared/env.js';
+import { sweepStaleJobLock } from './shared/sweep-stale-job.js';
 import { GitOps } from './tools/git.js';
 import { VaultFs } from './tools/vault.js';
 import {
@@ -105,6 +106,11 @@ async function main(): Promise<void> {
     mergeMetadata(vault),
     commitLocal(git),
   ];
+
+  // Clear orphaned lock rows from a previous crashed run (systemd hard-kills
+  // at 20 min; anything older than 30 min is unambiguously dead).
+  const swept = sweepStaleJobLock(dbPath, 'chiya-librarian', 30);
+  if (swept > 0) console.log(`[librarian] swept ${swept} stale lock row(s)`);
 
   const jobId = jobStore.acquireExclusive('chiya-librarian', { batchSize, minutes });
   if (!jobId) {

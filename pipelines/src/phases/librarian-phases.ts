@@ -43,7 +43,14 @@ import {
 // reapStale + loadBatch — queue management before the fan-out.
 // ---------------------------------------------------------------------------
 
-const STALE_PROCESSING_MINUTES = 60;
+// Articles spend ~50-85s in 'processing' under normal v3 load (router →
+// 4 scouts → reviewer → summary → writes). The in-pipeline soft deadline
+// is 8 min and the systemd hard-kill is 20 min, so any row still
+// 'processing' beyond 20 min is necessarily a crash victim. acquireExclusive
+// guarantees no concurrent librarian runs, so we can't reap a live row by
+// accident. Setting the reap threshold modestly above the hard-kill window
+// makes recovery take 1-2 timer ticks (10-min cadence) instead of 6.
+const STALE_PROCESSING_MINUTES = 20;
 
 export const reapStale = (store: ArticleStore): Phase<LibrarianCtx> => ({
   name: 'reap-stale',

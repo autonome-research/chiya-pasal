@@ -17,6 +17,7 @@ import OpenAI from 'openai';
 
 import { ArticleStore } from './shared/article-store.js';
 import { loadChiyaEnv, type InferenceTarget } from './shared/env.js';
+import { sweepStaleJobLock } from './shared/sweep-stale-job.js';
 import { GitOps } from './tools/git.js';
 import { VaultFs } from './tools/vault.js';
 import {
@@ -92,6 +93,14 @@ async function main(): Promise<void> {
     direction,
     date: todayLocal(),
   };
+
+  // Clear orphaned lock rows from a previous crashed run (digest systemd
+  // hard-kills at 15 min; anything older than 25 min is unambiguously dead).
+  // Without this, a single crash mid-digest leaves the lock RUNNING forever
+  // and every subsequent timer firing exits clean — the May-12 → May-17
+  // five-day digest outage was exactly that scenario.
+  const sweptLock = sweepStaleJobLock(dbPath, 'chiya-digest', 25);
+  if (sweptLock > 0) console.log(`[digest] swept ${sweptLock} stale lock row(s)`);
 
   // acquireExclusive: prevent overlapping digest runs (e.g. an AM run that
   // overruns into PM) from racing on git/email side effects.
