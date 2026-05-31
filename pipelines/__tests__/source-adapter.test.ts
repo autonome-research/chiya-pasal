@@ -7,6 +7,17 @@ import {
   type SourceAdapter,
 } from '../src/collection/source-adapter.js';
 import { SourceRegistry } from '../src/collection/registry.js';
+import {
+  doajSource,
+  europePmcSource,
+  inspireHepSource,
+  ncbiSource,
+  osfSource,
+  parseEuropePmc,
+  parseInspireHep,
+  parseZenodo,
+  zenodoSource,
+} from '../src/collection/sources/legacy-academic.js';
 
 describe('source adapter scaffold', () => {
   it('validates and normalizes article candidates', () => {
@@ -29,6 +40,30 @@ describe('source adapter scaffold', () => {
       abstract: 'abstract',
       doi: '10.1234/abc',
       authors: ['Alice', 'Bob'],
+    });
+  });
+
+  it('registers the legacy API parity adapters', () => {
+    const registry = new SourceRegistry()
+      .register(zenodoSource)
+      .register(doajSource)
+      .register(europePmcSource)
+      .register(inspireHepSource)
+      .register(ncbiSource)
+      .register(osfSource);
+
+    expect(registry.list()).toEqual(['doaj', 'europe-pmc', 'inspire-hep', 'ncbi', 'osf', 'zenodo']);
+  });
+
+  it('parses representative legacy API responses', () => {
+    expect(parseZenodo({ hits: { hits: [{ id: 1, metadata: { title: 'Z', doi: '10.1/z', description: 'abs' } }] } })[0]).toMatchObject({
+      title: 'Z', source: 'Zenodo', doi: '10.1/z', url: 'https://doi.org/10.1/z',
+    });
+    expect(parseEuropePmc({ resultList: { result: [{ title: 'E', pmcid: 'PMC1', abstractText: 'abs' }] } })[0]).toMatchObject({
+      title: 'E', source: 'Europe PMC', url: 'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1/',
+    });
+    expect(parseInspireHep({ hits: { hits: [{ id: 2, metadata: { titles: [{ title: 'I' }], citation_count: 3 } }] } })[0]).toMatchObject({
+      title: 'I', source: 'INSPIRE-HEP', url: 'https://inspirehep.net/literature/2',
     });
   });
 
