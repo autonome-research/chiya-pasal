@@ -148,52 +148,45 @@ Potential fixes:
 - remove or quarantine legacy v1/v2 tool surfaces
 - add comments where old surfaces are intentionally retained for scripts/tests
 
-### 7. Collection layer is more script-like than modular
+### 7. Collection layer modularization
 
-The Python matcha collection scripts work and pass lint, but `api_ingest.py` is large and source-specific logic is centralized in one file.
+Status: substantially improved.
 
-Potential split:
+The live API ingestion path now runs through TypeScript source adapters under `pipelines/src/collection/` and is invoked by `matcha/scripts/collect.sh`. It preserves the legacy output interface (`api-articles.jsonl` and `api-digest.md`) consumed by `filter_matcha.py`, so the raw inbox remains Markdown-first.
+
+Current adapter structure:
 
 ```text
-matcha/scripts/sources/
-  semantic_scholar.py
-  openalex.py
-  crossref.py
-  arxiv.py
-  europe_pmc.py
-  inspire.py
-  zenodo.py
-  doaj.py
-matcha/scripts/common/
-  candidate.py
-  normalization.py
-  dedup.py
-  rate_limit.py
-  output.py
+pipelines/src/collection/
+  source-adapter.ts
+  registry.ts
+  render.ts
+  api-ingest.ts
+  sources/
+    arxiv.ts
+    openalex.ts
+    crossref.ts
+    semantic-scholar.ts
 ```
 
-### 8. Source addition is not yet a first-class extension path
+Remaining collection work:
 
-Adding new APIs or RSS-derived source types currently requires editing collector logic directly. A future source system should make new source adapters easy to add and test.
+- port any desired legacy-only sources from `matcha/scripts/api_ingest.py` (e.g. Europe PMC, INSPIRE, Zenodo, DOAJ if still desired)
+- add per-source health/quality reporting beyond fetched/emitted/dropped counts
+- eventually decide whether `filter_matcha.py` should also move to TypeScript
 
-Potential adapter shape:
+### 8. Source addition is becoming a first-class extension path
 
-```python
-class SourceAdapter:
-    name: str
-    def fetch(self, config, interests) -> list[ArticleCandidate]: ...
-    def normalize(self, raw) -> ArticleCandidate: ...
+Adding API sources now has a TypeScript adapter shape:
+
+```ts
+export interface SourceAdapter<TConfig = unknown> {
+  readonly name: string;
+  fetch(config: TConfig, ctx: SourceContext): Promise<SourceRunResult>;
+}
 ```
 
-Or equivalent functional registry:
-
-```python
-SOURCES = [
-    OpenAlexSource(),
-    ArxivSource(),
-    CrossrefSource(),
-]
-```
+The next step is documenting a complete source-adapter example and adding any missing source-specific fixtures.
 
 ### 9. Raw inbox format could become more machine-native
 
