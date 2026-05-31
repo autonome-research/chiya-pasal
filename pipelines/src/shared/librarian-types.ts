@@ -9,6 +9,8 @@
 import type { BasePipelineContext } from 'thread-phase';
 
 import type { ArticleRow } from './article-store.js';
+import type { StableId } from '../phases/page-templates.js';
+import type { ReviewerOutput } from '../phases/reviewer.js';
 
 /** Per-article enriched body — full text fetched (or original snippet if no fetch was needed). */
 export interface EnrichedArticle {
@@ -44,6 +46,25 @@ export interface ArticleResult {
   logEntry?: string;
 }
 
+/** Semantic plan produced by the agentic per-article planner. It intentionally
+ *  stores reviewer output rather than final gated topics/cites so the serial
+ *  apply phase can revalidate against fresh vault state. */
+export interface PlannedArticle {
+  article: ArticleRow;
+  stableId: StableId;
+  sourceFilename: string;
+  sourcePath: string;
+  body: string;
+  summary: string;
+  reviewer: ReviewerOutput;
+}
+
+export type ArticlePlanResult =
+  | { articleId: number; outcome: 'planned'; plan: PlannedArticle }
+  | { articleId: number; outcome: 'skipped'; reason: string; sourcePath?: string }
+  | { articleId: number; outcome: 'failed'; reason: string }
+  | { articleId: number; outcome: 'deferred'; reason: string };
+
 export interface LibrarianCtx extends BasePipelineContext {
   readonly batchSize: number;
   readonly signal: AbortSignal;
@@ -60,6 +81,9 @@ export interface LibrarianCtx extends BasePipelineContext {
   // Set by batchExtractRefs.
   refs?: ExtractedRefs[];
 
-  // Set by the per-article fan-out (router → scouts → reviewer → write).
+  // Set by the per-article planner (router → scouts → reviewer → summary).
+  articlePlans?: ArticlePlanResult[];
+
+  // Set by the serial deterministic apply phase.
   results?: ArticleResult[];
 }

@@ -18,7 +18,9 @@ import OpenAI from 'openai';
 
 import { ArticleStore } from './shared/article-store.js';
 import { loadChiyaEnv, type InferenceTarget } from './shared/env.js';
+import { installShutdownHandlers } from './shared/shutdown.js';
 import { sweepStaleJobLock } from './shared/sweep-stale-job.js';
+import { VaultMutationLock, withVaultMutationLock } from './shared/vault-mutation-lock.js';
 import { GitOps } from './tools/git.js';
 import { VaultFs } from './tools/vault.js';
 import {
@@ -26,10 +28,11 @@ import {
   loadBatch,
   batchEnrich,
   batchExtractRefs,
-  perArticleTree,
   mergeMetadata,
   commitLocal,
 } from './phases/librarian-phases.js';
+import { planArticleTree } from './phases/librarian-planner.js';
+import { applyArticlePlans } from './phases/librarian-apply.js';
 import type { LibrarianCtx } from './shared/librarian-types.js';
 
 interface Args {
@@ -73,6 +76,7 @@ async function main(): Promise<void> {
   const store = new ArticleStore(dbPath);
   const jobStore = new SqliteJobStore(dbPath);
   const runner = new JobRunner(jobStore);
+  const vaultMutationLock = new VaultMutationLock({ vaultDir: env.vaultDir });
 
   const deadlineController = new AbortController();
   const deadlineTimer = setTimeout(
@@ -93,7 +97,7 @@ async function main(): Promise<void> {
     loadBatch(store),
     batchEnrich(),
     batchExtractRefs(),
-    perArticleTree(
+    planArticleTree(
       {
         toolsClient: clientFor(env.tools),
         toolsModel: env.tools.model,
@@ -103,8 +107,11 @@ async function main(): Promise<void> {
       vault,
       store,
     ),
-    mergeMetadata(vault),
-    commitLocal(git),
+    withVaultMutationLock(
+      vaultMutationLock,
+      [applyArticlePlans(vault, store), mergeMetadata(vault), commitLocal(git)],
+      'librarian-vault-mutation',
+    ),
   ];
 
   // Clear orphaned lock rows from a previous crashed run (systemd hard-kills
@@ -124,6 +131,11 @@ async function main(): Promise<void> {
     console.log(`[event:${e.eventType}]`, JSON.stringify(e.data)),
   );
 
+  const disposeShutdown = installShutdownHandlers('librarian', (signal) => {
+    if (!deadlineController.signal.aborted) deadlineController.abort(`received ${signal}`);
+    runner.cancel(jobId, `received ${signal}`);
+  });
+
   try {
     await runner.run(jobId, phases, ctx, () => ({
       batchSize,
@@ -131,6 +143,7 @@ async function main(): Promise<void> {
       counts: store.countByStatus(),
     }));
   } finally {
+    disposeShutdown();
     clearTimeout(deadlineTimer);
   }
 
