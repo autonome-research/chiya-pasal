@@ -11,8 +11,8 @@ Chiya (茶) — "tea" — a curated serving of research intelligence, delivered 
 │  Collection                                                  │
 │                                                              │
 │  Linux cron (every 4h) → matcha/scripts/collect.sh           │
-│    ├── api_ingest.py     → 8 API sources (Semantic Scholar,  │
-│    │                       OpenAlex, arXiv, etc.)            │
+│    ├── TS API ingest     → source adapters (Semantic Scholar,│
+│    │                       OpenAlex, CrossRef, arXiv)        │
 │    ├── matcha binary     → ~30 RSS feeds                     │
 │    └── filter_matcha.py  → dedup → vault/raw/inbox/*.json    │
 └──────────────────────────────────────────────────────────────┘
@@ -39,13 +39,13 @@ Two SQLite tables anchor the flow: `article` (status FSM: pending → processing
 ```
 chiya-library/
 ├── README.md                    # This file
-├── matcha/                      # Collection layer (Python + Go RSS reader)
+├── matcha/                      # Collection orchestration (shell + Go RSS reader)
 │   ├── config.yaml              # Feed URLs, limits, keywords
 │   ├── interests.yaml           # Interest keywords
 │   ├── scripts/
-│   │   ├── api_ingest.py        # API-source collector
+│   │   ├── collect.sh           # Calls TS API ingest + RSS + filter
 │   │   ├── filter_matcha.py     # Dedup + interest filter
-│   │   └── collect.sh           # Orchestrator
+│   │   └── api_ingest.py        # Legacy Python API collector (not live)
 │   └── logs/                    # Collection logs
 └── pipelines/                   # Curation layer (TS, thread-phase)
     ├── src/
@@ -69,7 +69,7 @@ chiya-library/
     │   └── tools/               # vault / git / email / web / article-lookup
     ├── scripts/                 # One-shots (migrations, dumps)
     ├── systemd/                 # User timer/service units
-    └── __tests__/               # Vitest suite (329 tests)
+    └── __tests__/               # Vitest suite (331 tests)
 ```
 
 The wiki is a separate repo (`~/vault`) — not vendored here. Sources live at `wiki/sources/<stable-id>.md`, topics at `wiki/topics/<slug>.md` (flat, with `clusters:` frontmatter for soft domain metadata), entities at `wiki/entities/<slug>.md`. The append-only `log.md` and `index.md` sit at the vault root.

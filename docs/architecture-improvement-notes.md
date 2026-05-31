@@ -365,8 +365,10 @@ Code should continue to:
 
 - introduce `ArticleCandidate` schema (scaffolded in TypeScript under `pipelines/src/collection`)
 - create source adapter registry (scaffolded in TypeScript under `pipelines/src/collection`)
-- add first concrete TypeScript source adapter (`arxivSource`, fixture-tested; not yet live)
-- split/port `api_ingest.py` by source
+- add first concrete TypeScript source adapter (`arxivSource`, fixture-tested)
+- TypeScript API ingest is now wired into `matcha/scripts/collect.sh` and emits the legacy `api-articles.jsonl` / `api-digest.md` interface
+- added OpenAlex, CrossRef, and Semantic Scholar adapters for the live TS API ingest path
+- continue splitting/porting any remaining `api_ingest.py` sources by adapter
 - emit Markdown-first raw inbox for now; revisit JSONL only with a migration rationale
 - keep Markdown as the canonical live collection artifact until a later decision
 

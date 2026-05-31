@@ -10,7 +10,7 @@ Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](http
 | `librarian` | live (v3 router → scouts → reviewer flow) | every 10 min (drain mode); switch to 30 min once `pending` clears |
 | `digest` | live | 06:30 / 18:30 local |
 
-329 tests, all green. `npm test`, `npx tsc --noEmit`.
+331 tests, all green. `npm test`, `npx tsc --noEmit`.
 
 ## Setup
 
