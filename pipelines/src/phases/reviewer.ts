@@ -12,10 +12,17 @@
  * deterministically.
  */
 
-import { parseJSON, runAgentWithTools, ToolRegistry } from 'thread-phase';
+import { runAgentWithTools, ToolRegistry } from 'thread-phase';
 import type OpenAI from 'openai';
 
 import type { ArticleRow } from '../shared/article-store.js';
+import {
+  invalid,
+  isRecord,
+  parseAndValidateJson,
+  valid,
+  type Validator,
+} from '../shared/llm-schema.js';
 import type { VaultFs } from '../tools/vault.js';
 import { registerReadOnlyVaultTools } from '../tools/vault.js';
 import type { ScoutOutput, SurfacedPage } from './scouts/types.js';
@@ -243,20 +250,11 @@ export async function runReviewerWith(
     entities: [],
     toolRounds: r.toolRounds,
   };
-  let parseFailed = false;
-  const parsed = parseJSON<Partial<ReviewerOutput>>(r.text, fallback, () => {
-    parseFailed = true;
-  });
-  if (parseFailed) {
-    return { ...fallback, error: 'parse-failed' };
+  const parsed = parseAndValidateJson(r.text, validateReviewerOutput);
+  if (!parsed.ok) {
+    return { ...fallback, error: parsed.reason };
   }
-  return {
-    topics: sanitizeTopics(parsed.topics),
-    cites: sanitizeCites(parsed.cites),
-    related: sanitizeRelated(parsed.related),
-    entities: sanitizeEntities(parsed.entities),
-    toolRounds: r.toolRounds,
-  };
+  return { ...parsed.value, toolRounds: r.toolRounds };
 }
 
 export type ReviewerRunner = (
@@ -277,6 +275,16 @@ const MAX_TOPICS = 4;
 const MAX_CITES = 6;
 const MAX_RELATED = 3;
 const MAX_ENTITIES = 3;
+
+const validateReviewerOutput: Validator<Omit<ReviewerOutput, 'toolRounds' | 'error'>> = (value) => {
+  if (!isRecord(value)) return invalid('invalid-shape');
+  return valid({
+    topics: sanitizeTopics(value.topics),
+    cites: sanitizeCites(value.cites),
+    related: sanitizeRelated(value.related),
+    entities: sanitizeEntities(value.entities),
+  });
+};
 
 function isStr(x: unknown): x is string {
   return typeof x === 'string' && x.trim().length > 0;

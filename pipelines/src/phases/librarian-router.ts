@@ -9,11 +9,18 @@
  * Single LLM call, no tools. Cheap. The scouts then run in parallel.
  */
 
-import { parseJSON, runAgentWithTools } from 'thread-phase';
+import { runAgentWithTools } from 'thread-phase';
 import type OpenAI from 'openai';
 
 import type { ArticleRow } from '../shared/article-store.js';
 import type { ExtractedRefs } from '../shared/librarian-types.js';
+import {
+  invalid,
+  isRecord,
+  parseAndValidateJson,
+  valid,
+  type Validator,
+} from '../shared/llm-schema.js';
 
 export interface RouterInput {
   article: ArticleRow;
@@ -134,6 +141,16 @@ function withDefaults(parsed: Partial<RouterOutput>): Omit<RouterOutput, 'error'
   };
 }
 
+const validateRouterOutput: Validator<Partial<RouterOutput>> = (value) => {
+  if (!isRecord(value)) return invalid('invalid-shape');
+  return valid({
+    topicScoutTask: typeof value.topicScoutTask === 'string' ? value.topicScoutTask : undefined,
+    sourceScoutTask: typeof value.sourceScoutTask === 'string' ? value.sourceScoutTask : undefined,
+    entityScoutTask: typeof value.entityScoutTask === 'string' ? value.entityScoutTask : undefined,
+    citeTrackerTask: typeof value.citeTrackerTask === 'string' ? value.citeTrackerTask : undefined,
+  });
+};
+
 export async function runRouterWith(
   input: RouterInput,
   clients: RouterClients,
@@ -151,12 +168,11 @@ export async function runRouterWith(
   if (r.finishReason === 'length') {
     return { ...DEFAULT_TASKS, error: 'truncated' };
   }
-  let parseFailed = false;
-  const parsed = parseJSON<Partial<RouterOutput>>(r.text, {}, () => { parseFailed = true; });
-  if (parseFailed) {
-    return { ...DEFAULT_TASKS, error: 'parse-failed' };
+  const parsed = parseAndValidateJson(r.text, validateRouterOutput);
+  if (!parsed.ok) {
+    return { ...DEFAULT_TASKS, error: parsed.reason };
   }
-  return withDefaults(parsed);
+  return withDefaults(parsed.value);
 }
 
 export type RouterRunner = (
