@@ -1,131 +1,132 @@
 # Chiya Library 🍵
 
-A persistent, interlinked knowledge base powered by automated collection, agent-driven curation, and Karpathy-style wiki architecture.
+A persistent, interlinked knowledge base powered by automated collection, agent-driven curation, and wiki-style cross-referencing.
 
 Chiya (茶) — "tea" — a curated serving of research intelligence, delivered daily.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Collection Layer                         │
-│                                                             │
-│  Linux cron (every 4h) → collect.sh                        │
-│    ├── api_ingest.py    → 8 API sources (Semantic Scholar,  │
-│    │                     OpenAlex, arXiv, etc.)             │
-│    ├── matcha binary    → ~30 RSS feeds (Nature, HN, labs) │
-│    └── filter_matcha.py → dedup → wiki/raw/articles/        │
-└─────────────────────────────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Curation Layer                           │
-│                                                             │
-│  Hermes cron (daily 6:30 PM PT) → Agent session            │
-│    ├── Librarian: ingest articles → wiki pages              │
-│    │                   cross-reference → index + log        │
-│    └── Digest Agent: curate → deliver to Discord           │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  Collection                                                  │
+│                                                              │
+│  Linux cron (every 4h) → matcha/scripts/collect.sh           │
+│    ├── api_ingest.py     → 8 API sources (Semantic Scholar,  │
+│    │                       OpenAlex, arXiv, etc.)            │
+│    ├── matcha binary     → ~30 RSS feeds                     │
+│    └── filter_matcha.py  → dedup → vault/raw/inbox/*.json    │
+└──────────────────────────────────────────────────────────────┘
+                            │
+┌──────────────────────────────────────────────────────────────┐
+│  Pipelines (TypeScript on thread-phase, systemd user timers) │
+│                                                              │
+│  intake.timer       (HH:03, every 4h)                        │
+│    └── scan raw/inbox/ → ArticleStore (pending) → archive    │
+│                                                              │
+│  librarian.timer    (every 10 min, drain mode)               │
+│    └── per article: router → 4 scouts → reviewer → write     │
+│         emits wiki/sources/<id>.md + topic touches + cites   │
+│                                                              │
+│  digest@.service    (06:30 + 18:30, AM/PM)                   │
+│    └── load → prioritize → draft → commit → push → email     │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+Two SQLite tables anchor the flow: `article` (status FSM: pending → processing → done/skipped/failed) and `job` (thread-phase's persisted run log). Both live in `<vault>/.chiya-pipelines.db`.
 
 ## Repository Structure
 
 ```
 chiya-library/
 ├── README.md                    # This file
-├── wiki/                        # The knowledge base
-│   ├── SCHEMA.md                # Conventions, tags, structure
-│   ├── TASTE.md                 # User preferences (manual)
-│   ├── index.md                 # Content catalog
-│   ├── log.md                   # Action log (append-only)
-│   ├── raw/articles/            # Daily intake: YYYY-MM-DD.md
-│   ├── raw/assets/              # Images, diagrams
-│   ├── entities/                # People, orgs, products
-│   ├── topics/                  # Knowledge by sub-field
-│   │   ├── ai-ml/
-│   │   ├── computing/
-│   │   ├── robotics/
-│   │   ├── neuroscience/
-│   │   ├── physics/
-│   │   ├── biology/
-│   │   ├── materials/
-│   │   ├── energy/
-│   │   └── cybersecurity/
-│   ├── user/                    # User profile & focuses
-│   │   ├── profile.md
-│   │   ├── interests.md
-│   │   └── focuses/             # Current priorities → digest signal
-│   ├── research/                # Active projects
-│   │   └── <project>/           # One sub-dir per project
-│   │       ├── STATUS.md        # Current state + last updated
-│   │       └── notes.md
-│   └── _archive/                # Superseded pages
-├── matcha/                      # Collection pipeline
+├── matcha/                      # Collection layer (Python + Go RSS reader)
 │   ├── config.yaml              # Feed URLs, limits, keywords
 │   ├── interests.yaml           # Interest keywords
 │   ├── scripts/
-│   │   ├── api_ingest.py        # API-only sources
-│   │   ├── filter_matcha.py     # Dedup only
-│   │   └── collect.sh           # Orchestrator script
+│   │   ├── api_ingest.py        # API-source collector
+│   │   ├── filter_matcha.py     # Dedup + interest filter
+│   │   └── collect.sh           # Orchestrator
 │   └── logs/                    # Collection logs
-├── agents/                      # Agent prompts
-│   ├── librarian/
-│   │   └── prompt.md            # Wiki ingestion workflow
-│   └── chiya-digest/
-│       └── prompt.md            # Digest curation workflow
-└── cron/                        # Cron configuration docs
-    └── README.md
+└── pipelines/                   # Curation layer (TS, thread-phase)
+    ├── src/
+    │   ├── intake.ts            # Pipeline entry points
+    │   ├── librarian.ts
+    │   ├── digest.ts
+    │   ├── phases/              # Phase compositions
+    │   │   ├── intake-phases.ts
+    │   │   ├── librarian-phases.ts
+    │   │   ├── librarian-router.ts
+    │   │   ├── scouts/          # 4 parallel exploration scouts
+    │   │   ├── reviewer.ts
+    │   │   ├── summary.ts
+    │   │   ├── digest-phases.ts
+    │   │   ├── page-templates.ts
+    │   │   └── topic-reconciler.ts
+    │   ├── shared/              # ArticleStore, env, types
+    │   └── tools/               # vault / git / email / web / article-lookup
+    ├── scripts/                 # One-shots (migrations, dumps)
+    ├── systemd/                 # User timer/service units
+    └── __tests__/               # Vitest suite (319 tests)
 ```
+
+The wiki is a separate repo (`~/vault`) — not vendored here. Sources live at `wiki/sources/<stable-id>.md`, topics at `wiki/topics/<slug>.md` (flat, with `clusters:` frontmatter for soft domain metadata), entities at `wiki/entities/<slug>.md`. The append-only `log.md` and `index.md` sit at the vault root.
 
 ## Quick Start
 
 ### Prerequisites
-- Python 3.8+
-- Go 1.21+ (to build matcha binary)
-- Git
+- Node 20+
+- Python 3.10+
+- Go 1.21+ (to build the matcha binary)
 
 ### Setup
 
 ```bash
-# 1. Clone the repo
-git clone git@github.com:Code4me2/chiya-library.git
-cd chiya-library
+# 1. Clone
+git clone git@github.com:autonome-research/chiya-pasal.git ~/chiya-library
+cd ~/chiya-library
 
-# 2. Build matcha binary (if not already built)
-cd matcha
-# (copy matcha source or build from https://github.com/Code4me2/matcha)
+# 2. Pipelines
+cd pipelines
+npm install
+npm run build
+
+# 3. Matcha collector
+cd ../matcha
 cp /path/to/matcha/bin/matcha bin/
+cp config.yaml.example config.yaml      # edit feeds
+cp interests.yaml.example interests.yaml
 
-# 3. Configure feeds
-cp matcha/config.yaml.example matcha/config.yaml  # edit feeds
-cp matcha/interests.yaml.example matcha/interests.yaml  # edit keywords
+# 4. Vault (separate repo, sibling of chiya-library by default)
+git clone <your-vault-remote> ~/vault
+# Edit ~/vault/TASTE.md, ~/vault/user/profile.md to taste
 
-# 4. Set up Linux cron (collection every 4h)
+# 5. matcha cron (collection every 4h)
 crontab -e
-# Add: 0 */4 * * * /path/to/chiya-library/matcha/scripts/collect.sh >> /path/to/chiya-library/matcha/logs/cron.log 2>&1
+# 0 */4 * * * /home/$USER/chiya-library/matcha/scripts/collect.sh >> /home/$USER/chiya-library/matcha/logs/cron.log 2>&1
 
-# 5. Set up TASTE.md
-# Edit wiki/TASTE.md with your preferences
-
-# 6. Set up user context
-# Edit wiki/user/profile.md, interests.md
-# Create wiki/user/focuses/<focus>.md for current priorities
+# 6. systemd timers (curation). See pipelines/README.md for the install steps.
 ```
 
-### Cron Jobs
+## Cadences
 
-**Collection** (Linux cron, every 4h):
-- Mechanical — runs `api_ingest.py` → `matcha` → `filter_matcha.py` → appends to `wiki/raw/articles/YYYY-MM-DD.md`
+| Layer | Trigger | Frequency |
+|---|---|---|
+| matcha collect | Linux cron | every 4h at HH:00 |
+| intake | systemd timer | HH:03 (3 min behind matcha) |
+| librarian | systemd timer | every 10 min (drain mode); switch to 30 min once backlog clears |
+| digest AM | systemd timer | 06:30 local |
+| digest PM | systemd timer | 18:30 local |
 
-**Curation** (Hermes cron, daily 6:30 PM PT):
-- Agent-driven — librarian ingests into wiki, digest agent curates and delivers
-
-See `cron/README.md` for details.
+The digest commits and pushes the vault on every successful run, so GitHub sees updates twice daily.
 
 ## Sources
 
-- **RSS feeds:** arXiv (cs.AI, cs.LG, cs.CV, cs.RO, etc.), Nature, Science, Hacker News, DeepMind/OpenAI/Anthropic blogs, tech news
-- **API sources:** Semantic Scholar, OpenAlex, CrossRef, arXiv API, Europe PMC, INSPIRE-HEP, Zenodo, DOAJ
+- **RSS feeds:** arXiv (cs.AI, cs.LG, cs.CV, cs.RO, …), Nature, Science, Hacker News, DeepMind/OpenAI/Anthropic blogs, lab feeds
+- **APIs:** Semantic Scholar, OpenAlex, CrossRef, arXiv, Europe PMC, INSPIRE-HEP, Zenodo, DOAJ
+
+## Pipeline detail
+
+See `pipelines/README.md` for systemd install steps, the per-pipeline phase composition, and operational notes.
 
 ## License
 
