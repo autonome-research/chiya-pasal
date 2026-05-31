@@ -89,11 +89,9 @@ pipelines/src/phases/librarian/
 
 ### 3. Digest phase module is also accumulating responsibility
 
-`digest-phases.ts` contains context loading, article loading, classification, section drafting, assembly, log append, commit, push, and email.
+Status: addressed as a first modularization pass.
 
-This is less urgent than the librarian split, but similar decomposition would make it easier for future agents/users to modify a single behavior without understanding the whole digest flow.
-
-Potential split:
+`digest-phases.ts` now preserves the public export surface, while implementation lives under:
 
 ```text
 pipelines/src/phases/digest/
@@ -104,6 +102,8 @@ pipelines/src/phases/digest/
   assemble.ts
   publish.ts
 ```
+
+This makes it easier for future agents/users to modify classification, drafting, or publishing behavior independently.
 
 ### 4. Agent output validation is uneven
 
@@ -351,23 +351,23 @@ Code should continue to:
 - fix concurrent vault write race (implemented for the librarian hot path via semantic plans + serial apply)
 - add cross-pipeline vault/git mutation lock (implemented with `VaultMutationLock`)
 - add graceful signal cancellation (started: entrypoints now install SIGTERM/SIGINT handlers)
-- add stronger LLM output validation (started: digest classifier validates bucket/parse/truncation)
+- add stronger LLM output validation (started: digest classifier uses shared lightweight validator; other agents still ad hoc)
 - check digest truncation and invalid buckets (started: section drafts throw on truncation; invalid classifier buckets become skip)
 
 ### Phase 2 — pipeline modularization
 
-- split librarian phases
-- split digest phases
+- split librarian phases (started: planner/apply split landed; queue/enrichment/refs still in `librarian-phases.ts`)
+- split digest phases (implemented under `src/phases/digest/`)
 - extract common runner/env/client helpers
-- isolate deterministic writer logic
+- isolate deterministic writer logic (started: `librarian-apply.ts`)
 
 ### Phase 3 — matcha/source synthesis refactor
 
-- introduce `ArticleCandidate` schema
-- create source adapter registry
-- split `api_ingest.py` by source
-- emit canonical JSONL
-- keep Markdown as derived human-readable output
+- introduce `ArticleCandidate` schema (scaffolded in TypeScript under `pipelines/src/collection`)
+- create source adapter registry (scaffolded in TypeScript under `pipelines/src/collection`)
+- split/port `api_ingest.py` by source
+- emit Markdown-first raw inbox for now; revisit JSONL only with a migration rationale
+- keep Markdown as the canonical live collection artifact until a later decision
 
 ### Phase 4 — reuse and agent-friendliness
 

@@ -10,7 +10,7 @@ Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](http
 | `librarian` | live (v3 router → scouts → reviewer flow) | every 10 min (drain mode); switch to 30 min once `pending` clears |
 | `digest` | live | 06:30 / 18:30 local |
 
-324 tests, all green. `npm test`, `npx tsc --noEmit`.
+326 tests, all green. `npm test`, `npx tsc --noEmit`.
 
 ## Setup
 
@@ -121,6 +121,8 @@ commitLocal         (pure)   single git commit per run (no push — digest pushe
 Per-article planning wall: ~50-85s (7 LLM calls). Batch=10 + planning concurrency=4 → ~4-5 min/batch, fits in the 8-min in-pipeline deadline + 20-min systemd hard kill. Vault/DB writes are then applied serially to avoid lost updates on shared topic/backlink pages. The apply/metadata/commit block runs under a cross-process vault mutation lock shared with digest publishing.
 
 ### digest.ts
+
+Implementation is split under `src/phases/digest/` (`context`, `load-articles`, `classify`, `draft`, `assemble`, `publish`). `src/phases/digest-phases.ts` remains a compatibility re-export surface.
 
 ```
 loadContext         (pure)   read CLAUDE.md, TASTE.md, index, log tail, focuses, research/STATUS

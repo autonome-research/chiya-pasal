@@ -62,13 +62,14 @@ chiya-library/
     │   │   ├── reviewer.ts
     │   │   ├── summary.ts
     │   │   ├── digest-phases.ts
+    │   │   ├── digest/          # context/load/classify/draft/publish modules
     │   │   ├── page-templates.ts
     │   │   └── topic-reconciler.ts
     │   ├── shared/              # ArticleStore, env, types
     │   └── tools/               # vault / git / email / web / article-lookup
     ├── scripts/                 # One-shots (migrations, dumps)
     ├── systemd/                 # User timer/service units
-    └── __tests__/               # Vitest suite (324 tests)
+    └── __tests__/               # Vitest suite (326 tests)
 ```
 
 The wiki is a separate repo (`~/vault`) — not vendored here. Sources live at `wiki/sources/<stable-id>.md`, topics at `wiki/topics/<slug>.md` (flat, with `clusters:` frontmatter for soft domain metadata), entities at `wiki/entities/<slug>.md`. The append-only `log.md` and `index.md` sit at the vault root.
