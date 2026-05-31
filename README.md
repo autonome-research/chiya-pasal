@@ -125,7 +125,7 @@ The digest commits and pushes the vault on every successful run, so GitHub sees 
 ## Sources
 
 - **RSS feeds:** arXiv (cs.AI, cs.LG, cs.CV, cs.RO, …), Nature, Science, Hacker News, DeepMind/OpenAI/Anthropic blogs, lab feeds
-- **APIs:** Semantic Scholar, OpenAlex, CrossRef, arXiv, Europe PMC, INSPIRE-HEP, Zenodo, DOAJ
+- **APIs:** Semantic Scholar, OpenAlex, CrossRef, arXiv, Europe PMC, INSPIRE-HEP, Zenodo, DOAJ, NCBI/PubMed, OSF
 
 ## Pipeline detail
 
