@@ -161,18 +161,20 @@ pipelines/src/collection/
   source-adapter.ts
   registry.ts
   render.ts
+  paths.ts
   api-ingest.ts
   sources/
     arxiv.ts
     openalex.ts
     crossref.ts
     semantic-scholar.ts
+    legacy-academic.ts   # Zenodo, DOAJ, Europe PMC, INSPIRE-HEP, NCBI/PubMed, OSF
 ```
 
 Remaining collection work:
 
-- port any desired legacy-only sources from `matcha/scripts/api_ingest.py` (e.g. Europe PMC, INSPIRE, Zenodo, DOAJ if still desired)
 - add per-source health/quality reporting beyond fetched/emitted/dropped counts
+- add richer parser fixtures for every source-specific response shape
 - eventually decide whether `filter_matcha.py` should also move to TypeScript
 
 ### 8. Source addition is becoming a first-class extension path
@@ -360,8 +362,8 @@ Code should continue to:
 - create source adapter registry (scaffolded in TypeScript under `pipelines/src/collection`)
 - add first concrete TypeScript source adapter (`arxivSource`, fixture-tested)
 - TypeScript API ingest is now wired into `matcha/scripts/collect.sh` and emits the legacy `api-articles.jsonl` / `api-digest.md` interface
-- added OpenAlex, CrossRef, and Semantic Scholar adapters for the live TS API ingest path
-- continue splitting/porting any remaining `api_ingest.py` sources by adapter
+- added OpenAlex, CrossRef, Semantic Scholar, Zenodo, DOAJ, Europe PMC, INSPIRE-HEP, NCBI/PubMed, and OSF adapters for the live TS API ingest path
+- continue improving source-specific fixtures and health reporting
 - emit Markdown-first raw inbox for now; revisit JSONL only with a migration rationale
 - keep Markdown as the canonical live collection artifact until a later decision
 

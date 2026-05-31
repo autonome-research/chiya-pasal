@@ -12,9 +12,10 @@ Chiya (茶) — "tea" — a curated serving of research intelligence, delivered 
 │                                                              │
 │  Linux cron (every 4h) → matcha/scripts/collect.sh           │
 │    ├── TS API ingest     → source adapters (Semantic Scholar,│
-│    │                       OpenAlex, CrossRef, arXiv)        │
+│    │                       OpenAlex, CrossRef, arXiv, legacy │
+│    │                       academic APIs)                    │
 │    ├── matcha binary     → ~30 RSS feeds                     │
-│    └── filter_matcha.py  → dedup → vault/raw/inbox/*.json    │
+│    └── filter_matcha.py  → dedup → vault/raw/inbox/*.md      │
 └──────────────────────────────────────────────────────────────┘
                             │
 ┌──────────────────────────────────────────────────────────────┐
@@ -69,7 +70,7 @@ chiya-library/
     │   └── tools/               # vault / git / email / web / article-lookup
     ├── scripts/                 # One-shots (migrations, dumps)
     ├── systemd/                 # User timer/service units
-    └── __tests__/               # Vitest suite (331 tests)
+    └── __tests__/               # Vitest suite (342 tests)
 ```
 
 The wiki is a separate repo (`~/vault`) — not vendored here. Sources live at `wiki/sources/<stable-id>.md`, topics at `wiki/topics/<slug>.md` (flat, with `clusters:` frontmatter for soft domain metadata), entities at `wiki/entities/<slug>.md`. The append-only `log.md` and `index.md` sit at the vault root.

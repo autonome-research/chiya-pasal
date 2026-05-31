@@ -100,7 +100,7 @@ The live matcha collector calls the TypeScript API ingest from `matcha/scripts/c
 ### intake.ts
 
 ```
-scanInbox          (pure)   read vault/raw/inbox/*.json
+scanInbox          (pure)   read vault/raw/inbox/*-articles.md
 parseAndStore      (pure)   upsert into ArticleStore (URL + title hash dedup)
 archiveInboxFiles  (pure)   move processed files → vault/raw/inbox/archive/
 ```
