@@ -19,6 +19,7 @@ import {
 
 import { ArticleStore } from './shared/article-store.js';
 import { loadChiyaEnv } from './shared/env.js';
+import { installShutdownHandlers } from './shared/shutdown.js';
 import { VaultFs } from './tools/vault.js';
 import {
   archiveInboxFiles,
@@ -44,13 +45,21 @@ async function main(): Promise<void> {
     console.log(`[event:${e.eventType}]`, JSON.stringify(e.data)),
   );
 
+  const disposeShutdown = installShutdownHandlers('intake', (signal) => {
+    runner.cancel(jobId, `received ${signal}`);
+  });
+
   const ctx: IntakeCtx = { cache: new PipelineCache(), vaultDir: env.vaultDir };
 
-  await runner.run(jobId, phases, ctx, () => ({
-    files: ctx.fileResults?.length ?? 0,
-    inserted: ctx.fileResults?.reduce((n, r) => n + r.inserted, 0) ?? 0,
-    counts: store.countByStatus(),
-  }));
+  try {
+    await runner.run(jobId, phases, ctx, () => ({
+      files: ctx.fileResults?.length ?? 0,
+      inserted: ctx.fileResults?.reduce((n, r) => n + r.inserted, 0) ?? 0,
+      counts: store.countByStatus(),
+    }));
+  } finally {
+    disposeShutdown();
+  }
 
   const final = jobStore.getJob(jobId);
   console.log(`[intake] job ${jobId} → ${final?.status}`);

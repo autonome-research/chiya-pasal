@@ -17,7 +17,9 @@ import OpenAI from 'openai';
 
 import { ArticleStore } from './shared/article-store.js';
 import { loadChiyaEnv, type InferenceTarget } from './shared/env.js';
+import { installShutdownHandlers } from './shared/shutdown.js';
 import { sweepStaleJobLock } from './shared/sweep-stale-job.js';
+import { VaultMutationLock, withVaultMutationLock } from './shared/vault-mutation-lock.js';
 import { GitOps } from './tools/git.js';
 import { VaultFs } from './tools/vault.js';
 import {
@@ -68,6 +70,7 @@ async function main(): Promise<void> {
 
   const vault = new VaultFs(env.vaultDir);
   const git = new GitOps({ vaultDir: env.vaultDir, remote: env.vaultRemote, branch: env.vaultBranch });
+  const vaultMutationLock = new VaultMutationLock({ vaultDir: env.vaultDir });
   // Digest has no tool calls — everything routes through the fast client.
   const fastClient = clientFor(env.fast);
   const dbPath = process.env.THREAD_PHASE_DB ?? `${env.vaultDir}/.chiya-pipelines.db`;
@@ -79,19 +82,23 @@ async function main(): Promise<void> {
     prioritize(fastClient, env.fast.model),
     draftSections(fastClient, env.fast.model),
     assemble,
-    appendLog(vault),
-    commitDigest(git),
-    squashAndPush(git),
+    withVaultMutationLock(
+      vaultMutationLock,
+      [appendLog(vault), commitDigest(git), squashAndPush(git)],
+      'digest-vault-mutation',
+    ),
     emailSend(env),
   ];
 
   const store = new SqliteJobStore(dbPath);
   const runner = new JobRunner(store);
 
+  const runController = new AbortController();
   const ctx: DigestCtx = {
     cache: new PipelineCache(),
     direction,
     date: todayLocal(),
+    signal: runController.signal,
   };
 
   // Clear orphaned lock rows from a previous crashed run (digest systemd
@@ -117,14 +124,23 @@ async function main(): Promise<void> {
     console.log(`[event:${e.eventType}]`, JSON.stringify(e.data));
   });
 
-  await runner.run(jobId, phases, ctx, () => ({
-    direction: ctx.direction,
-    date: ctx.date,
-    articleCount: ctx.articles?.length ?? 0,
-    highlighted: ctx.classified?.filter((c) => c.bucket !== 'skip').length ?? 0,
-    pushed: ctx.pushed,
-    emailed: ctx.emailed,
-  }));
+  const disposeShutdown = installShutdownHandlers('digest', (signal) => {
+    if (!runController.signal.aborted) runController.abort(`received ${signal}`);
+    runner.cancel(jobId, `received ${signal}`);
+  });
+
+  try {
+    await runner.run(jobId, phases, ctx, () => ({
+      direction: ctx.direction,
+      date: ctx.date,
+      articleCount: ctx.articles?.length ?? 0,
+      highlighted: ctx.classified?.filter((c) => c.bucket !== 'skip').length ?? 0,
+      pushed: ctx.pushed,
+      emailed: ctx.emailed,
+    }));
+  } finally {
+    disposeShutdown();
+  }
 
   const final = store.getJob(jobId);
   console.log(`[digest] job ${jobId} → ${final?.status}`);

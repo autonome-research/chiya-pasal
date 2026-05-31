@@ -42,6 +42,8 @@ export interface DigestCtx extends BasePipelineContext {
   // Inputs (set by the entry point)
   readonly direction: DigestDirection;
   readonly date: string; // YYYY-MM-DD
+  /** Entry-point cancellation signal, plumbed into digest LLM calls. */
+  readonly signal: AbortSignal;
 
   // Phase outputs
   vault?: VaultContext;

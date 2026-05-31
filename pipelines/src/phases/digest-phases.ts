@@ -210,6 +210,25 @@ URL: ${article.url}
 Field: ${article.field}${article.snippet ? `\nSnippet: ${article.snippet}` : ''}`;
 }
 
+interface ClassifierWireOutput {
+  bucket?: unknown;
+  reason?: unknown;
+  wikilinks?: unknown;
+}
+
+function isBucket(value: unknown): value is Bucket {
+  return value === 'focus' || value === 'notable' || value === 'followup' || value === 'skip';
+}
+
+function cleanWikilinks(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((x): x is string => typeof x === 'string').map((x) => x.trim()).filter(Boolean).slice(0, 8);
+}
+
+function classifierSkip(article: Article, reason: string): ClassifiedArticle {
+  return { article, bucket: 'skip', reason, wikilinks: [] };
+}
+
 export const prioritize =
   (client: OpenAI, model: string, concurrency: number = 4): Phase<DigestCtx> =>
   ({
@@ -254,19 +273,27 @@ export const prioritize =
               maxTokens: 800,
             },
             [{ role: 'user', content: buildClassifierUserMessage(article) }],
-            { client, toolExecutor: noTools, cache: ctx.cache },
+            { client, toolExecutor: noTools, cache: ctx.cache, signal: ctx.signal },
           );
 
-          const parsed = parseJSON<{ bucket: Bucket; reason: string; wikilinks?: string[] }>(
-            r.text,
-            { bucket: 'skip', reason: 'parse-failed', wikilinks: [] },
-          );
+          if (r.finishReason === 'length') {
+            return classifierSkip(article, 'classifier-truncated');
+          }
+
+          let parseFailed = false;
+          const parsed = parseJSON<ClassifierWireOutput>(r.text, {}, () => {
+            parseFailed = true;
+          });
+          if (parseFailed) return classifierSkip(article, 'parse-failed');
+          if (!isBucket(parsed.bucket)) {
+            return classifierSkip(article, `invalid-bucket:${String(parsed.bucket).slice(0, 40)}`);
+          }
 
           return {
             article,
             bucket: parsed.bucket,
-            reason: parsed.reason,
-            wikilinks: parsed.wikilinks ?? [],
+            reason: typeof parsed.reason === 'string' && parsed.reason.trim() ? parsed.reason.trim() : 'no-reason',
+            wikilinks: cleanWikilinks(parsed.wikilinks),
           };
         },
         onItemDone: ({ index, result }) => {
@@ -422,8 +449,11 @@ async function draftOneSection(
       maxTokens: 2500,
     },
     [{ role: 'user', content: buildSectionUserMessage(bucketLabel, bucketRole, classified, vault) }],
-    { client, toolExecutor: noTools, cache: ctx.cache },
+    { client, toolExecutor: noTools, cache: ctx.cache, signal: ctx.signal },
   );
+  if (r.finishReason === 'length') {
+    throw new Error(`digest section draft truncated: ${bucketLabel}`);
+  }
   return r.text.trim();
 }
 
