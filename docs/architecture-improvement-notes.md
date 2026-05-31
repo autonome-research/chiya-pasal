@@ -365,13 +365,14 @@ Code should continue to:
 
 - introduce `ArticleCandidate` schema (scaffolded in TypeScript under `pipelines/src/collection`)
 - create source adapter registry (scaffolded in TypeScript under `pipelines/src/collection`)
+- add first concrete TypeScript source adapter (`arxivSource`, fixture-tested; not yet live)
 - split/port `api_ingest.py` by source
 - emit Markdown-first raw inbox for now; revisit JSONL only with a migration rationale
 - keep Markdown as the canonical live collection artifact until a later decision
 
 ### Phase 4 — reuse and agent-friendliness
 
-- add contributor/developer docs
+- add contributor/developer docs (started: `docs/developer-guide.md`)
 - add dry-run workflows
 - add source and phase templates
 - add operational `doctor`/inspection commands
