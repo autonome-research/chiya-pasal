@@ -10,7 +10,7 @@ Agents should explore with scoped tools and return bounded structured outputs. T
 
 ## Adding a source adapter
 
-The TypeScript source-synthesis scaffold lives in `pipelines/src/collection/`. The first concrete example is `pipelines/src/collection/sources/arxiv.ts`.
+The TypeScript source-synthesis layer lives in `pipelines/src/collection/`. Concrete adapters live under `pipelines/src/collection/sources/` and currently cover arXiv, OpenAlex, Crossref, Semantic Scholar, plus legacy academic APIs in `legacy-academic.ts`.
 
 A source adapter implements:
 

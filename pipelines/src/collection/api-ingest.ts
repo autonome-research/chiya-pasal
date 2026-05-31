@@ -8,16 +8,24 @@
  */
 
 import { promises as fs } from 'fs';
-import { dirname, resolve } from 'path';
-import { fileURLToPath } from 'url';
+import { resolve } from 'path';
 
 import { SourceRegistry } from './registry.js';
 import { normalizeCandidate, type ArticleCandidate } from './source-adapter.js';
 import { renderDigest, renderJsonl } from './render.js';
+import { resolveMatchaDir, resolveMatchaScriptsDir } from './paths.js';
 import { arxivSource } from './sources/arxiv.js';
 import { openAlexSource } from './sources/openalex.js';
 import { crossrefSource } from './sources/crossref.js';
 import { semanticScholarSource } from './sources/semantic-scholar.js';
+import {
+  doajSource,
+  europePmcSource,
+  inspireHepSource,
+  ncbiSource,
+  osfSource,
+  zenodoSource,
+} from './sources/legacy-academic.js';
 
 interface QuerySpec {
   query: string;
@@ -25,33 +33,44 @@ interface QuerySpec {
   sources: string[];
 }
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(__dirname, '../../..');
-const matchaDir = resolve(repoRoot, '../matcha');
-const scriptsDir = resolve(matchaDir, 'scripts');
+const matchaDir = resolveMatchaDir(import.meta.url);
+const scriptsDir = resolveMatchaScriptsDir(import.meta.url);
 const maxResults = Number(process.env.API_MAX_RESULTS ?? '6');
 
 const QUERIES: QuerySpec[] = [
-  { query: 'large language models transformer reinforcement learning', field: 'AI/ML', sources: ['semantic-scholar', 'openalex', 'arxiv'] },
-  { query: 'synthetic biology drug discovery biotech AI', field: 'Biotech', sources: ['openalex', 'crossref'] },
-  { query: 'quantum computing quantum information physics', field: 'Physics', sources: ['openalex', 'arxiv', 'crossref'] },
-  { query: 'semiconductor chip EUV lithography nanotech', field: 'Semiconductor', sources: ['openalex', 'crossref'] },
-  { query: 'climate energy storage battery renewable', field: 'Energy/Climate', sources: ['openalex', 'crossref'] },
-  { query: 'deep learning computer vision AI architecture', field: 'AI/ML', sources: ['semantic-scholar', 'openalex', 'arxiv'] },
-  { query: 'cybersecurity cryptography threat intelligence', field: 'Cybersecurity', sources: ['semantic-scholar', 'crossref'] },
-  { query: 'robotics autonomous systems reinforcement', field: 'Robotics', sources: ['openalex', 'arxiv'] },
-  { query: 'space technology aerospace satellite', field: 'Space/Aerospace', sources: ['openalex', 'crossref'] },
-  { query: 'nuclear fusion energy technology', field: 'Nuclear/Fusion', sources: ['openalex', 'crossref'] },
-  { query: 'materials science MOF nanomaterial', field: 'Materials Science', sources: ['openalex', 'crossref'] },
+  { query: 'large language models transformer reinforcement learning', field: 'AI/ML', sources: ['semantic-scholar', 'openalex', 'arxiv', 'crossref', 'ncbi'] },
+  { query: 'synthetic biology drug discovery biotech AI', field: 'Biotech', sources: ['europe-pmc', 'openalex', 'ncbi'] },
+  { query: 'quantum computing quantum information physics', field: 'Physics', sources: ['inspire-hep', 'arxiv', 'openalex'] },
+  { query: 'semiconductor chip EUV lithography nanotech', field: 'Semiconductor', sources: ['crossref', 'openalex'] },
+  { query: 'climate energy storage battery renewable', field: 'Energy/Climate', sources: ['zenodo', 'openalex'] },
+  { query: 'deep learning computer vision AI architecture', field: 'AI/ML', sources: ['semantic-scholar', 'arxiv', 'crossref', 'osf'] },
+  { query: 'cybersecurity cryptography threat intelligence', field: 'Cybersecurity', sources: ['semantic-scholar', 'inspire-hep', 'arxiv', 'crossref'] },
+  { query: 'robotics autonomous systems reinforcement', field: 'Robotics', sources: ['arxiv', 'openalex', 'osf'] },
+  { query: 'space technology aerospace satellite', field: 'Space/Aerospace', sources: ['arxiv', 'zenodo', 'openalex'] },
+  { query: 'nuclear fusion energy technology', field: 'Nuclear/Fusion', sources: ['inspire-hep', 'openalex'] },
+  { query: 'materials science MOF nanomaterial', field: 'Materials Science', sources: ['zenodo', 'crossref', 'openalex'] },
+  { query: 'open access AI research reproducibility datasets', field: 'Open Access', sources: ['doaj'] },
+];
+
+const REGISTERED_SOURCES = [
+  arxivSource,
+  openAlexSource,
+  crossrefSource,
+  semanticScholarSource,
+  zenodoSource,
+  doajSource,
+  europePmcSource,
+  inspireHepSource,
+  ncbiSource,
+  osfSource,
 ];
 
 async function main(): Promise<void> {
   const interests = await loadInterests(resolve(matchaDir, 'interests.yaml'));
-  const registry = new SourceRegistry()
-    .register(arxivSource)
-    .register(openAlexSource)
-    .register(crossrefSource)
-    .register(semanticScholarSource);
+  const registry = REGISTERED_SOURCES.reduce(
+    (r, source) => r.register(source),
+    new SourceRegistry(),
+  );
 
   const candidates: ArticleCandidate[] = [];
   const reports = [];

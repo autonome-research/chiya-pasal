@@ -181,6 +181,7 @@ async function applyPlannedArticle(
       field: plan.article.field,
       topics: gated.existingTopicSlugs,
       cites: gated.citeFilenames,
+      related: gated.relatedFilenames,
       summary: plan.summary,
     });
     await writer.write(plan.sourcePath, sourceContent);

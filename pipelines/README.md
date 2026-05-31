@@ -10,7 +10,7 @@ Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](http
 | `librarian` | live (v3 router → scouts → reviewer flow) | every 10 min (drain mode); switch to 30 min once `pending` clears |
 | `digest` | live | 06:30 / 18:30 local |
 
-331 tests, all green. `npm test`, `npx tsc --noEmit`.
+342 tests, all green. `npm test`, `npm run build`.
 
 ## Setup
 
@@ -35,6 +35,7 @@ npm run build
 | `TOOLS_INFERENCE_BASE_URL` | `http://localhost:11435/v1` | Tool-capable endpoint |
 | `TOOLS_INFERENCE_MODEL` | `gemma4:26b` | Used by librarian router + scouts + reviewer. `26b` because `e4b` confabulated tool calls without actually invoking them. |
 | `THREAD_PHASE_DB` | `<VAULT_DIR>/.chiya-pipelines.db` | Shared SQLite for both `article` and `job` tables |
+| `CHIYA_FAST_MAX_TOKENS` | `4000` | Output-token cap for fast-tier digest classify/draft calls. Raised for reasoning models that otherwise spend the full cap on hidden reasoning and return `finishReason: length`. |
 
 The default `localhost:11435` is the SSH tunnel installed via `chiya-tunnel-tiny.service` (forwards to tiny-emerson:11434).
 
@@ -87,10 +88,19 @@ journalctl --user -u chiya-librarian.service -f
 
 ## Pipeline shapes
 
+### collection/api-ingest.ts
+
+The live matcha collector calls the TypeScript API ingest from `matcha/scripts/collect.sh` before RSS filtering. `src/collection/api-ingest.ts` resolves the repository-local `matcha/` directory via `src/collection/paths.ts` and writes:
+
+- `matcha/scripts/api-articles.jsonl`
+- `matcha/scripts/api-digest.md`
+
+`CHIYA_MATCHA_DIR` can override the computed `matcha/` path for tests or non-standard deployments. Registered API adapters now cover the legacy Python collector's active public endpoints: Semantic Scholar, OpenAlex, Crossref, arXiv, Zenodo, DOAJ, Europe PMC, INSPIRE-HEP, NCBI/PubMed, and OSF.
+
 ### intake.ts
 
 ```
-scanInbox          (pure)   read vault/raw/inbox/*.json
+scanInbox          (pure)   read vault/raw/inbox/*-articles.md
 parseAndStore      (pure)   upsert into ArticleStore (URL + title hash dedup)
 archiveInboxFiles  (pure)   move processed files → vault/raw/inbox/archive/
 ```
@@ -113,12 +123,12 @@ planArticleTree     (LLM)    per-article fan-out, concurrency=4, no writes:
                               ├── reviewer        (synthesizes the 4 scouts, vault_read)
                               └── summary         (fast-tier, no tools)
 applyArticlePlans   (pure)   serial revalidation + deterministic writes
-                              source page + topic touches + backlinks + ArticleStore status
+                              source page + topic touches + cite/entity backlinks + related source edges + ArticleStore status
 mergeMetadata       (pure)   append per-article entries to vault/log.md
 commitLocal         (pure)   single git commit per run (no push — digest pushes)
 ```
 
-Per-article planning wall: ~50-85s (7 LLM calls). Batch=10 + planning concurrency=4 → ~4-5 min/batch, fits in the 8-min in-pipeline deadline + 20-min systemd hard kill. Vault/DB writes are then applied serially to avoid lost updates on shared topic/backlink pages. The apply/metadata/commit block runs under a cross-process vault mutation lock shared with digest publishing.
+Per-article planning wall: ~50-85s (7 LLM calls). Batch=10 + planning concurrency=4 → ~4-5 min/batch, fits in the 8-min in-pipeline deadline + 20-min systemd hard kill. Vault/DB writes are then applied serially to avoid lost updates on shared topic/backlink pages. New topic proposals are reconciled against both existing topics and other new proposals in the same reviewer output, so near-duplicates collapse before page creation. Reviewer-approved related sources are rendered as source-page frontmatter (`related: [...]`) and a `## Related sources` wikilink section. The apply/metadata/commit block runs under a cross-process vault mutation lock shared with digest publishing.
 
 ### digest.ts
 

@@ -97,9 +97,8 @@ export interface GatedRecommendations {
   citeFilenames: string[];
   /** Entity slugs whose pages exist in the vault. */
   entitySlugs: string[];
-  /** Related-source filenames whose pages exist (for "## Related sources"
-   *  sections — currently informational only, not landed in the source-page
-   *  template; the librarian can fold these into cites as it sees fit). */
+  /** Related-source filenames whose pages exist; rendered on the new source page
+   *  as frontmatter graph edges plus a "## Related sources" section. */
   relatedFilenames: string[];
   /** Diagnostic: counts of what got dropped at each gate. */
   gateStats: {

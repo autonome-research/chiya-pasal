@@ -35,6 +35,8 @@ export interface TopicOutput {
 export interface ReconcileResult {
   reconciled: TopicOutput;
   foldedSlugs: string[];
+  /** New-topic proposals dropped because they duplicate another new proposal in the same output. */
+  dedupedNewSlugs: Array<{ slug: string; matched: string }>;
   droppedHallucinations: Array<{ i: number; slug: string }>;
 }
 
@@ -44,28 +46,46 @@ export function reconcileTopicOutput(
 ): ReconcileResult {
   const foldedSlugs: string[] = [];
   const trulyNew: TopicProposal[] = [];
+  const dedupedNewSlugs: Array<{ slug: string; matched: string }> = [];
+  const newSlugAliases = new Map<string, string>();
+  const acceptedNewSlugs = new Set<string>();
+
   for (const nt of output.newTopics) {
     if (existingSlugs.has(nt.slug)) {
       foldedSlugs.push(nt.slug);
-    } else {
-      trulyNew.push(nt);
+      continue;
     }
+
+    const nearExisting = isNearDuplicate(nt.slug, acceptedNewSlugs);
+    if (nearExisting.duplicate) {
+      dedupedNewSlugs.push({ slug: nt.slug, matched: nearExisting.matched });
+      newSlugAliases.set(nt.slug, nearExisting.matched);
+      continue;
+    }
+
+    trulyNew.push(nt);
+    acceptedNewSlugs.add(nt.slug);
   }
   const trulyNewSlugs = new Set(trulyNew.map((nt) => nt.slug));
 
   const droppedHallucinations: Array<{ i: number; slug: string }> = [];
   const decisions: TopicDecision[] = output.decisions.map((d) => {
-    const kept = d.topics.filter((slug) => {
-      if (existingSlugs.has(slug) || trulyNewSlugs.has(slug)) return true;
-      droppedHallucinations.push({ i: d.i, slug });
-      return false;
-    });
+    const kept: string[] = [];
+    for (const originalSlug of d.topics) {
+      const slug = newSlugAliases.get(originalSlug) ?? originalSlug;
+      if (existingSlugs.has(slug) || trulyNewSlugs.has(slug)) {
+        if (!kept.includes(slug)) kept.push(slug);
+        continue;
+      }
+      droppedHallucinations.push({ i: d.i, slug: originalSlug });
+    }
     return { i: d.i, topics: kept.length > 0 ? kept : ['uncategorized'] };
   });
 
   return {
     reconciled: { decisions, newTopics: trulyNew },
     foldedSlugs,
+    dedupedNewSlugs,
     droppedHallucinations,
   };
 }
@@ -89,13 +109,20 @@ export function isNearDuplicate(
   existingSlugs: ReadonlySet<string>,
 ): { duplicate: true; matched: string } | { duplicate: false } {
   const norm = (s: string): string => s.toLowerCase().replace(/-/g, '');
+  const contentKey = (s: string): string => s
+    .toLowerCase()
+    .split('-')
+    .filter((part) => part && !['a', 'an', 'and', 'for', 'in', 'of', 'on', 'the', 'to', 'with'].includes(part))
+    .join('');
   const target = norm(proposedSlug);
+  const targetContent = contentKey(proposedSlug);
   for (const existing of existingSlugs) {
     if (existing.toLowerCase() === proposedSlug.toLowerCase()) {
       return { duplicate: true, matched: existing };
     }
     const en = norm(existing);
     if (en === target) return { duplicate: true, matched: existing };
+    if (contentKey(existing) === targetContent) return { duplicate: true, matched: existing };
     const longer = target.length >= en.length ? target : en;
     const shorter = target.length >= en.length ? en : target;
     if (longer.startsWith(shorter) && longer.length - shorter.length <= 3) {
