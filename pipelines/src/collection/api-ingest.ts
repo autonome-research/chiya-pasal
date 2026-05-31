@@ -8,12 +8,12 @@
  */
 
 import { promises as fs } from 'fs';
-import { dirname, resolve } from 'path';
-import { fileURLToPath } from 'url';
+import { resolve } from 'path';
 
 import { SourceRegistry } from './registry.js';
 import { normalizeCandidate, type ArticleCandidate } from './source-adapter.js';
 import { renderDigest, renderJsonl } from './render.js';
+import { resolveMatchaDir, resolveMatchaScriptsDir } from './paths.js';
 import { arxivSource } from './sources/arxiv.js';
 import { openAlexSource } from './sources/openalex.js';
 import { crossrefSource } from './sources/crossref.js';
@@ -25,10 +25,8 @@ interface QuerySpec {
   sources: string[];
 }
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(__dirname, '../../..');
-const matchaDir = resolve(repoRoot, '../matcha');
-const scriptsDir = resolve(matchaDir, 'scripts');
+const matchaDir = resolveMatchaDir(import.meta.url);
+const scriptsDir = resolveMatchaScriptsDir(import.meta.url);
 const maxResults = Number(process.env.API_MAX_RESULTS ?? '6');
 
 const QUERIES: QuerySpec[] = [
