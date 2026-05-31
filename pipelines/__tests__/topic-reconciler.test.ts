@@ -33,6 +33,20 @@ describe('reconcileTopicOutput', () => {
     expect(r.reconciled.decisions[0]!.topics).toEqual(['legal-technology']);
   });
 
+  it('dedupes near-duplicate new topics within the same reviewer output', () => {
+    const out: TopicOutput = {
+      decisions: [{ i: 0, topics: ['rl-in-llms', 'rl-llms'] }],
+      newTopics: [
+        { slug: 'rl-in-llms', definition: 'Reinforcement learning methods applied inside large language model training and adaptation.', members: [0] },
+        { slug: 'rl-llms', definition: 'Reinforcement learning methods for large language models and agent policies.', members: [0] },
+      ],
+    };
+    const r = reconcileTopicOutput(out, new Set());
+    expect(r.dedupedNewSlugs).toEqual([{ slug: 'rl-llms', matched: 'rl-in-llms' }]);
+    expect(r.reconciled.newTopics.map((t) => t.slug)).toEqual(['rl-in-llms']);
+    expect(r.reconciled.decisions[0]!.topics).toEqual(['rl-in-llms']);
+  });
+
   it('drops a hallucinated slug not in existing or proposed', () => {
     const out: TopicOutput = {
       decisions: [{ i: 0, topics: ['real-existing', 'made-up-slug'] }],
@@ -83,6 +97,7 @@ describe('reconcileTopicOutput', () => {
     const second = reconcileTopicOutput(first.reconciled, new Set(['clean']));
     expect(second.reconciled).toEqual(first.reconciled);
     expect(second.foldedSlugs).toEqual([]);
+    expect(second.dedupedNewSlugs).toEqual([]);
     expect(second.droppedHallucinations).toEqual([]);
   });
 });
