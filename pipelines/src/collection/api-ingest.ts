@@ -1,0 +1,133 @@
+#!/usr/bin/env tsx
+/**
+ * TypeScript replacement for matcha/scripts/api_ingest.py.
+ *
+ * Emits the same files consumed by matcha/scripts/filter_matcha.py:
+ *   - matcha/scripts/api-articles.jsonl
+ *   - matcha/scripts/api-digest.md
+ */
+
+import { promises as fs } from 'fs';
+import { dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
+
+import { SourceRegistry } from './registry.js';
+import { normalizeCandidate, type ArticleCandidate } from './source-adapter.js';
+import { renderDigest, renderJsonl } from './render.js';
+import { arxivSource } from './sources/arxiv.js';
+import { openAlexSource } from './sources/openalex.js';
+import { crossrefSource } from './sources/crossref.js';
+import { semanticScholarSource } from './sources/semantic-scholar.js';
+
+interface QuerySpec {
+  query: string;
+  field: string;
+  sources: string[];
+}
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(__dirname, '../../..');
+const matchaDir = resolve(repoRoot, '../matcha');
+const scriptsDir = resolve(matchaDir, 'scripts');
+const maxResults = Number(process.env.API_MAX_RESULTS ?? '6');
+
+const QUERIES: QuerySpec[] = [
+  { query: 'large language models transformer reinforcement learning', field: 'AI/ML', sources: ['semantic-scholar', 'openalex', 'arxiv'] },
+  { query: 'synthetic biology drug discovery biotech AI', field: 'Biotech', sources: ['openalex', 'crossref'] },
+  { query: 'quantum computing quantum information physics', field: 'Physics', sources: ['openalex', 'arxiv', 'crossref'] },
+  { query: 'semiconductor chip EUV lithography nanotech', field: 'Semiconductor', sources: ['openalex', 'crossref'] },
+  { query: 'climate energy storage battery renewable', field: 'Energy/Climate', sources: ['openalex', 'crossref'] },
+  { query: 'deep learning computer vision AI architecture', field: 'AI/ML', sources: ['semantic-scholar', 'openalex', 'arxiv'] },
+  { query: 'cybersecurity cryptography threat intelligence', field: 'Cybersecurity', sources: ['semantic-scholar', 'crossref'] },
+  { query: 'robotics autonomous systems reinforcement', field: 'Robotics', sources: ['openalex', 'arxiv'] },
+  { query: 'space technology aerospace satellite', field: 'Space/Aerospace', sources: ['openalex', 'crossref'] },
+  { query: 'nuclear fusion energy technology', field: 'Nuclear/Fusion', sources: ['openalex', 'crossref'] },
+  { query: 'materials science MOF nanomaterial', field: 'Materials Science', sources: ['openalex', 'crossref'] },
+];
+
+async function main(): Promise<void> {
+  const interests = await loadInterests(resolve(matchaDir, 'interests.yaml'));
+  const registry = new SourceRegistry()
+    .register(arxivSource)
+    .register(openAlexSource)
+    .register(crossrefSource)
+    .register(semanticScholarSource);
+
+  const candidates: ArticleCandidate[] = [];
+  const reports = [];
+
+  for (const spec of QUERIES) {
+    for (const source of spec.sources) {
+      const adapter = registry.get(source);
+      if (!adapter) continue;
+      try {
+        const query = source === 'arxiv' ? queryToArxiv(spec.query) : spec.query;
+        const result = await adapter.fetch({ query, maxResults, field: spec.field }, { now: new Date(), interests });
+        candidates.push(...result.candidates);
+        reports.push(result.report);
+      } catch (err) {
+        reports.push({ source, fetched: 0, emitted: 0, dropped: 0, warnings: [err instanceof Error ? err.message : String(err)] });
+      }
+    }
+  }
+
+  const unique = dedupeCandidates(candidates).slice(0, Number(process.env.API_TOTAL_MAX ?? '500'));
+  await fs.mkdir(scriptsDir, { recursive: true });
+  await fs.writeFile(resolve(scriptsDir, 'api-articles.jsonl'), renderJsonl(unique), 'utf8');
+  await fs.writeFile(resolve(scriptsDir, 'api-digest.md'), renderDigest(unique, reports), 'utf8');
+  console.log(`[api-ingest-ts] emitted ${unique.length} candidates from ${reports.length} source runs`);
+}
+
+function dedupeCandidates(candidates: ArticleCandidate[]): ArticleCandidate[] {
+  const seen = new Set<string>();
+  const out: ArticleCandidate[] = [];
+  for (const c of candidates.map(normalizeCandidate)) {
+    const key = (c.doi ? `doi:${c.doi}` : c.arxivId ? `arxiv:${c.arxivId}` : `url:${normalizeUrl(c.url)}`).toLowerCase();
+    const titleKey = `title:${c.title.toLowerCase().replace(/\s+/g, ' ')}`;
+    if (seen.has(key) || seen.has(titleKey)) continue;
+    seen.add(key);
+    seen.add(titleKey);
+    out.push(c);
+  }
+  return out;
+}
+
+function normalizeUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.hostname}${u.pathname.replace(/\/$/, '')}`.toLowerCase();
+  } catch {
+    return url.trim().toLowerCase();
+  }
+}
+
+function queryToArxiv(query: string): string {
+  const terms = query.split(/\s+/).filter((t) => t.length > 2).slice(0, 6);
+  return terms.map((t) => `all:${t}`).join(' AND ');
+}
+
+async function loadInterests(path: string): Promise<Record<string, string[]>> {
+  try {
+    const text = await fs.readFile(path, 'utf8');
+    const out: Record<string, string[]> = {};
+    let current: string | null = null;
+    for (const line of text.split('\n')) {
+      const group = /^\s{2}([A-Za-z0-9_-]+):\s*$/.exec(line);
+      if (group) {
+        current = group[1]!;
+        out[current] = [];
+        continue;
+      }
+      const item = /^\s{4}-\s+"?(.+?)"?\s*$/.exec(line);
+      if (item && current) out[current]!.push(item[1]!);
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+main().catch((err) => {
+  console.error('[api-ingest-ts] fatal:', err);
+  process.exit(1);
+});

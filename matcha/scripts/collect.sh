@@ -1,6 +1,6 @@
 #!/bin/bash
 # collect.sh — Matcha collection orchestrator
-# Runs: api_ingest → matcha RSS → filter/dedup → VAULT_DIR/raw/inbox/YYYY-MM-DD-articles.md
+# Runs: TypeScript API ingest → matcha RSS → filter/dedup → VAULT_DIR/raw/inbox/YYYY-MM-DD-articles.md
 # Triggered by Linux cron every 4 hours
 #
 # VAULT_DIR env var points to the target vault (default: ~/vault)
@@ -64,9 +64,10 @@ log "━━━━━━━━━━━━━━━━━━━━━━━━━
 queue_health
 
 # Step 1: API ingestion
-log "> Step 1: API ingestion (api_ingest.py)..."
+log "> Step 1: API ingestion (TypeScript source adapters)..."
+cd "$MATCHA_DIR/../pipelines"
+/usr/bin/env npx tsx src/collection/api-ingest.ts >> "$LOG" 2>&1
 cd "$SCRIPT_DIR"
-python3 api_ingest.py >> "$LOG" 2>&1
 log "[done] API ingestion complete"
 
 # Step 2: RSS fetch (matcha binary)
