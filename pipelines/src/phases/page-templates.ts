@@ -25,6 +25,8 @@ export interface SourcePageInput {
   field: string | null;
   topics: string[];
   cites: string[];
+  /** Existing source filenames (without wiki/sources/ and .md) related to this source. */
+  related?: string[];
   summary: string;
 }
 
@@ -130,6 +132,7 @@ export function formatSourcePage(input: SourcePageInput): string {
   if (input.stableId.kind === 'doi') {
     fmLines.push(`doi: ${input.doi ?? input.stableId.doi}`);
   }
+  const related = input.related ?? [];
   fmLines.push(
     `source_name: ${sourceLabel}`,
     `collected: ${collectedYmd}`,
@@ -137,6 +140,7 @@ export function formatSourcePage(input: SourcePageInput): string {
     `field: ${fieldLabel}`,
     `topics: ${yamlInlineArray(input.topics)}`,
     `cites: ${yamlInlineArray(input.cites)}`,
+    `related: ${yamlInlineArray(related)}`,
     '---',
   );
 
@@ -163,6 +167,12 @@ export function formatSourcePage(input: SourcePageInput): string {
     body.push('_None resolved against the current library._');
   } else {
     for (const c of input.cites) body.push(`- [[wiki/sources/${c}]]`);
+  }
+  body.push('', '## Related sources', '');
+  if (related.length === 0) {
+    body.push('_None._');
+  } else {
+    for (const r of related) body.push(`- [[wiki/sources/${r}]]`);
   }
   body.push('', '## Cited by', '');
 
