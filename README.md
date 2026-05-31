@@ -24,8 +24,8 @@ Chiya (茶) — "tea" — a curated serving of research intelligence, delivered 
 │    └── scan raw/inbox/ → ArticleStore (pending) → archive    │
 │                                                              │
 │  librarian.timer    (every 10 min, drain mode)               │
-│    └── per article: router → 4 scouts → reviewer → write     │
-│         emits wiki/sources/<id>.md + topic touches + cites   │
+│    └── per article: router → 4 scouts → reviewer → plan      │
+│         then serial apply emits source/topic/cite pages       │
 │                                                              │
 │  digest@.service    (06:30 + 18:30, AM/PM)                   │
 │    └── load → prioritize → draft → commit → push → email     │
@@ -55,6 +55,8 @@ chiya-library/
     │   ├── phases/              # Phase compositions
     │   │   ├── intake-phases.ts
     │   │   ├── librarian-phases.ts
+    │   │   ├── librarian-planner.ts
+    │   │   ├── librarian-apply.ts
     │   │   ├── librarian-router.ts
     │   │   ├── scouts/          # 4 parallel exploration scouts
     │   │   ├── reviewer.ts
@@ -66,7 +68,7 @@ chiya-library/
     │   └── tools/               # vault / git / email / web / article-lookup
     ├── scripts/                 # One-shots (migrations, dumps)
     ├── systemd/                 # User timer/service units
-    └── __tests__/               # Vitest suite (319 tests)
+    └── __tests__/               # Vitest suite (324 tests)
 ```
 
 The wiki is a separate repo (`~/vault`) — not vendored here. Sources live at `wiki/sources/<stable-id>.md`, topics at `wiki/topics/<slug>.md` (flat, with `clusters:` frontmatter for soft domain metadata), entities at `wiki/entities/<slug>.md`. The append-only `log.md` and `index.md` sit at the vault root.

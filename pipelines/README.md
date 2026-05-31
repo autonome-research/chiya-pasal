@@ -10,7 +10,7 @@ Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](http
 | `librarian` | live (v3 router → scouts → reviewer flow) | every 10 min (drain mode); switch to 30 min once `pending` clears |
 | `digest` | live | 06:30 / 18:30 local |
 
-319 tests, all green. `npm test`, `npx tsc --noEmit`.
+324 tests, all green. `npm test`, `npx tsc --noEmit`.
 
 ## Setup
 
@@ -104,20 +104,21 @@ reapStale           (pure)   reset stuck 'processing' rows (> 20 min) back to pe
 loadBatch           (pure)   pull up to N pending rows, mark as processing
 batchEnrich         (HTTP)   fetch full text for thin snippets, capped at 50KB
 batchExtractRefs    (pure)   regex-extract arxiv IDs + DOIs from each body
-perArticleTree      (LLM)    per-article fan-out, concurrency=4:
+planArticleTree     (LLM)    per-article fan-out, concurrency=4, no writes:
                               ├── router          (1 call, no tools)
                               ├── topic-scout     (vault_read, vault_list, vault_search)
                               ├── source-scout    (+ article_search_by_title)
                               ├── entity-scout    (vault tools)
                               ├── cite-tracker    (+ article_lookup_by_arxiv/doi)
                               ├── reviewer        (synthesizes the 4 scouts, vault_read)
-                              ├── summary         (fast-tier, no tools)
-                              └── deterministic writes (source + topics + backlinks)
+                              └── summary         (fast-tier, no tools)
+applyArticlePlans   (pure)   serial revalidation + deterministic writes
+                              source page + topic touches + backlinks + ArticleStore status
 mergeMetadata       (pure)   append per-article entries to vault/log.md
 commitLocal         (pure)   single git commit per run (no push — digest pushes)
 ```
 
-Per-article wall: ~50-85s (7 LLM calls). Batch=10 + concurrency=4 → ~4-5 min/batch, fits in the 8-min in-pipeline deadline + 20-min systemd hard kill.
+Per-article planning wall: ~50-85s (7 LLM calls). Batch=10 + planning concurrency=4 → ~4-5 min/batch, fits in the 8-min in-pipeline deadline + 20-min systemd hard kill. Vault/DB writes are then applied serially to avoid lost updates on shared topic/backlink pages. The apply/metadata/commit block runs under a cross-process vault mutation lock shared with digest publishing.
 
 ### digest.ts
 
@@ -144,3 +145,5 @@ Two mechanisms keep a crashed run from blocking everything that follows:
 2. **`reapStaleProcessing`** — first phase of every librarian run. Resets any `article.status='processing'` row older than 20 min back to `pending`. The librarian's `acquireExclusive` guarantees no concurrent runs, so we can't reap a live row by accident.
 
 Both are tested in `__tests__/sweep-stale-job.test.ts` and `__tests__/article-store.test.ts`.
+
+3. **`VaultMutationLock`** — wraps librarian apply/metadata/commit and digest append/commit/push using an atomic lock directory under the vault root. This prevents cross-service `log.md` and git races while still allowing the expensive agent planning/classification work to run outside the lock.
