@@ -19,7 +19,7 @@ import {
   valid,
   type Validator,
 } from '../../shared/llm-schema.js';
-import { noTools } from './common.js';
+import { FAST_MAX_TOKENS, noTools } from './common.js';
 
 const CLASSIFIER_BUCKETS = `Buckets:
 - "focus":     directly hits one of the user's listed focuses or active research projects.
@@ -127,7 +127,7 @@ export const prioritize =
               model,
               tools: [],
               maxToolRounds: 1,
-              maxTokens: 800,
+              maxTokens: FAST_MAX_TOKENS,
             },
             [{ role: 'user', content: buildClassifierUserMessage(article) }],
             { client, toolExecutor: noTools, cache: ctx.cache, signal: ctx.signal },

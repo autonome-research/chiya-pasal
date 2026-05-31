@@ -9,7 +9,7 @@ import type {
   DigestSection,
   VaultContext,
 } from '../../shared/digest-types.js';
-import { noTools } from './common.js';
+import { FAST_MAX_TOKENS, noTools } from './common.js';
 
 const SECTION_SYSTEM = `You are a research-digest writer. Given a list of pre-classified articles for ONE section, write a tight scannable list of 1-line entries.
 
@@ -107,7 +107,7 @@ async function draftOneSection(
       model,
       tools: [],
       maxToolRounds: 1,
-      maxTokens: 2500,
+      maxTokens: FAST_MAX_TOKENS,
     },
     [{ role: 'user', content: buildSectionUserMessage(bucketLabel, bucketRole, classified, vault) }],
     { client, toolExecutor: noTools, cache: ctx.cache, signal: ctx.signal },
