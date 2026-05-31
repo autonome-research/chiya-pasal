@@ -12,7 +12,7 @@
  * least one candidate survives the filter.
  */
 
-import { parseJSON, runAgentWithTools, ToolRegistry } from 'thread-phase';
+import { runAgentWithTools, ToolRegistry } from 'thread-phase';
 import type OpenAI from 'openai';
 
 import type { ArticleRow, ArticleStore } from '../../shared/article-store.js';
@@ -20,7 +20,8 @@ import type { ExtractedRefs } from '../../shared/librarian-types.js';
 import { registerArticleLookupTools } from '../../tools/article-lookup.js';
 import { registerReadOnlyVaultTools, type VaultFs } from '../../tools/vault.js';
 import { stableIdForUrl, stableIdToFilename } from '../page-templates.js';
-import type { ScoutOutput, SurfacedPage } from './types.js';
+import type { ScoutOutput } from './types.js';
+import { parseSurfacedPagesJson } from './validate.js';
 
 export interface CiteTrackerInput {
   article: ArticleRow;
@@ -263,39 +264,12 @@ export async function runCiteTrackerWith(
     return { surfacedPages: [], error: 'truncated', toolRounds: r.toolRounds };
   }
 
-  const fallback: { surfacedPages: SurfacedPage[] } = { surfacedPages: [] };
-  let parseError: string | undefined;
-  const parsed = parseJSON<{ surfacedPages?: SurfacedPage[] }>(
-    r.text,
-    fallback,
-    (_preview, err) => {
-      parseError = `parse-failed: ${err.message.slice(0, 120)}`;
-    },
-  );
-
-  if (parseError) {
-    return { surfacedPages: [], error: parseError, toolRounds: r.toolRounds };
-  }
-  if (!Array.isArray(parsed.surfacedPages)) {
-    return { surfacedPages: [], error: 'parse-failed', toolRounds: r.toolRounds };
+  const parsed = parseSurfacedPagesJson(r.text, MAX_SURFACED_PAGES);
+  if (!parsed.ok) {
+    return { surfacedPages: [], error: parsed.reason, toolRounds: r.toolRounds };
   }
 
-  // Sanitize: drop entries missing required fields, cap to MAX_SURFACED_PAGES.
-  const cleaned: SurfacedPage[] = [];
-  for (const p of parsed.surfacedPages) {
-    if (
-      !p ||
-      typeof p.path !== 'string' ||
-      typeof p.excerpt !== 'string' ||
-      typeof p.relevanceNote !== 'string'
-    ) {
-      continue;
-    }
-    cleaned.push({ path: p.path, excerpt: p.excerpt, relevanceNote: p.relevanceNote });
-    if (cleaned.length >= MAX_SURFACED_PAGES) break;
-  }
-
-  return { surfacedPages: cleaned, toolRounds: r.toolRounds };
+  return { surfacedPages: parsed.value.surfacedPages, toolRounds: r.toolRounds };
 }
 
 /** Real implementation — runAgentWithTools loop with read-only vault tools +

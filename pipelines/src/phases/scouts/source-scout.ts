@@ -17,13 +17,14 @@
  * tests can stub the LLM call without mocking the openai module loader.
  */
 
-import { parseJSON, runAgentWithTools, ToolRegistry } from 'thread-phase';
+import { runAgentWithTools, ToolRegistry } from 'thread-phase';
 import type OpenAI from 'openai';
 
 import type { ArticleRow, ArticleStore } from '../../shared/article-store.js';
 import type { VaultFs } from '../../tools/vault.js';
 import { registerArticleLookupTools } from '../../tools/article-lookup.js';
-import type { ScoutOutput, SurfacedPage } from './types.js';
+import type { ScoutOutput } from './types.js';
+import { parseSurfacedPagesJson } from './validate.js';
 
 export interface SourceScoutInput {
   article: ArticleRow;
@@ -194,35 +195,12 @@ export async function callSourceScoutAgent(
     return { surfacedPages: [], error: 'truncated', toolRounds };
   }
 
-  let parseError: string | null = null;
-  const fallback: { surfacedPages: SurfacedPage[] } = { surfacedPages: [] };
-  const parsed = parseJSON<{ surfacedPages?: SurfacedPage[] }>(
-    r.text,
-    fallback,
-    (_preview, err) => {
-      parseError = err.message.slice(0, 120);
-    },
-  );
-  if (parseError !== null || !Array.isArray(parsed.surfacedPages)) {
-    return {
-      surfacedPages: [],
-      error: parseError ?? 'parse-failed',
-      toolRounds,
-    };
+  const parsed = parseSurfacedPagesJson(r.text, MAX_SURFACED);
+  if (!parsed.ok) {
+    return { surfacedPages: [], error: parsed.reason, toolRounds };
   }
 
-  // Defensive: cap surfaced pages at MAX_SURFACED in case the model ignores
-  // the prompt's "at most 4" guideline.
-  const surfacedPages = parsed.surfacedPages
-    .filter((p) => p && typeof p.path === 'string' && p.path.length > 0)
-    .slice(0, MAX_SURFACED)
-    .map((p) => ({
-      path: String(p.path),
-      excerpt: String(p.excerpt ?? '').slice(0, 400),
-      relevanceNote: String(p.relevanceNote ?? ''),
-    }));
-
-  return { surfacedPages, toolRounds };
+  return { surfacedPages: parsed.value.surfacedPages, toolRounds };
 }
 
 /**

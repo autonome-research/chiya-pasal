@@ -9,12 +9,13 @@
  * sees signal, not a vault dump.
  */
 
-import { parseJSON, runAgentWithTools, ToolRegistry } from 'thread-phase';
+import { runAgentWithTools, ToolRegistry } from 'thread-phase';
 import type OpenAI from 'openai';
 
 import type { ArticleRow } from '../../shared/article-store.js';
 import { registerReadOnlyVaultTools, type VaultFs } from '../../tools/vault.js';
-import type { ScoutOutput, SurfacedPage } from './types.js';
+import type { ScoutOutput } from './types.js';
+import { parseSurfacedPagesJson } from './validate.js';
 
 export interface TopicScoutInput {
   article: ArticleRow;
@@ -166,30 +167,12 @@ export async function runTopicScoutWith(
     return { surfacedPages: [], error: 'truncated', toolRounds: r.toolRounds };
   }
 
-  // We need to distinguish "agent legitimately returned []" from "agent
-  // returned non-JSON and parseJSON silently fell back." parseJSON's onError
-  // hook fires only on the second case; capture it here.
-  let parseFailed = false;
-  const fallback: { surfacedPages: SurfacedPage[] } = { surfacedPages: [] };
-  const parsed = parseJSON<{ surfacedPages?: SurfacedPage[] }>(r.text, fallback, () => {
-    parseFailed = true;
-  });
-
-  if (parseFailed || !Array.isArray(parsed.surfacedPages)) {
-    return { surfacedPages: [], error: 'parse-failed', toolRounds: r.toolRounds };
+  const parsed = parseSurfacedPagesJson(r.text, MAX_SURFACED_PAGES);
+  if (!parsed.ok) {
+    return { surfacedPages: [], error: parsed.reason, toolRounds: r.toolRounds };
   }
 
-  // Sanitize: drop entries missing required fields, cap to MAX_SURFACED_PAGES.
-  const cleaned: SurfacedPage[] = [];
-  for (const p of parsed.surfacedPages) {
-    if (!p || typeof p.path !== 'string' || typeof p.excerpt !== 'string' || typeof p.relevanceNote !== 'string') {
-      continue;
-    }
-    cleaned.push({ path: p.path, excerpt: p.excerpt, relevanceNote: p.relevanceNote });
-    if (cleaned.length >= MAX_SURFACED_PAGES) break;
-  }
-
-  return { surfacedPages: cleaned, toolRounds: r.toolRounds };
+  return { surfacedPages: parsed.value.surfacedPages, toolRounds: r.toolRounds };
 }
 
 /** Real implementation — runAgentWithTools loop with the scout's read-only
