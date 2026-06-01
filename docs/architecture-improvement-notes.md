@@ -209,7 +209,7 @@ This is fine for the current deployment, but future reuse by other users/agents 
 Potential fixes:
 
 - named config profiles: local, remote, dry-run, test
-- one `chiya doctor` command to validate vault, DB, inference, git, email, and collection sources
+- one `chiya doctor` command to validate vault, DB, inference, git, email, and collection sources (started as `npm run doctor`: env/email, vault, DB, git, inference)
 - generated systemd/cron templates from config
 
 ### 11. Observability is good but could become more actionable
@@ -372,7 +372,7 @@ Code should continue to:
 - add contributor/developer docs (started: `docs/developer-guide.md`)
 - add dry-run workflows (started: librarian `--dry-run` and `--plan-only`)
 - add source and phase templates
-- add operational `doctor`/inspection commands
+- add operational `doctor`/inspection commands (started: `npm run doctor`; `status`/`jobs`/`sources --health` remain open)
 
 ## Open questions for discussion
 

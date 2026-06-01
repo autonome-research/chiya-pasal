@@ -70,7 +70,7 @@ chiya-library/
     │   └── tools/               # vault / git / email / web / article-lookup
     ├── scripts/                 # One-shots (migrations, dumps)
     ├── systemd/                 # User timer/service units
-    └── __tests__/               # Vitest suite (346 tests)
+    └── __tests__/               # Vitest suite (349 tests)
 ```
 
 The wiki is a separate repo (`~/vault`) — not vendored here. Sources live at `wiki/sources/<stable-id>.md`, topics at `wiki/topics/<slug>.md` (flat, with `clusters:` frontmatter for soft domain metadata), entities at `wiki/entities/<slug>.md`. The append-only `log.md` and `index.md` sit at the vault root.
@@ -108,7 +108,10 @@ git clone <your-vault-remote> ~/vault
 crontab -e
 # 0 */4 * * * /home/$USER/chiya-library/matcha/scripts/collect.sh >> /home/$USER/chiya-library/matcha/logs/cron.log 2>&1
 
-# 6. systemd timers (curation). See pipelines/README.md for the install steps.
+# 6. Optional health check
+cd pipelines && npm run doctor -- --no-network
+
+# 7. systemd timers (curation). See pipelines/README.md for the install steps.
 ```
 
 ## Cadences

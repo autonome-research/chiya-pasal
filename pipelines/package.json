@@ -13,6 +13,7 @@
     "digest:pm": "tsx src/digest.ts PM",
     "librarian": "tsx src/librarian.ts",
     "intake": "tsx src/intake.ts",
+    "doctor": "tsx src/doctor.ts",
     "migrate-queue": "tsx scripts/migrate-queue.ts",
     "backfill-source-urls": "tsx scripts/backfill-source-urls.ts",
     "migrate-topics": "tsx scripts/migrate-topics.ts",

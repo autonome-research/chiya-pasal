@@ -10,7 +10,7 @@ Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](http
 | `librarian` | live (v3 router → scouts → reviewer flow) | every 10 min (drain mode); switch to 30 min once `pending` clears |
 | `digest` | live | 06:30 / 18:30 local |
 
-346 tests, all green. `npm test`, `npm run build`.
+349 tests, all green. `npm test`, `npm run build`.
 
 ## Setup
 
@@ -44,6 +44,7 @@ The default `localhost:11435` is the SSH tunnel installed via `chiya-tunnel-tiny
 ```bash
 set -a && source .env && set +a   # systemd loads this automatically
 
+npm run doctor -- --no-network    # validate env/vault/db/git without inference HTTP checks
 npm run intake                    # tsx src/intake.ts
 npm run librarian                 # tsx src/librarian.ts
 npm run librarian -- --dry-run    # calls agents + previews apply; no vault/git/article status mutation
@@ -52,7 +53,7 @@ npm run digest:am                 # tsx src/digest.ts AM
 npm run digest:pm                 # tsx src/digest.ts PM
 ```
 
-Each run logs every event to stdout. Persisted job + event log lives in `$THREAD_PHASE_DB`. Inspect with sqlite directly or via thread-phase's `JobStore.getJob` / `getEvents`.
+Each pipeline run logs every event to stdout. Persisted job + event log lives in `$THREAD_PHASE_DB`. Inspect with sqlite directly or via thread-phase's `JobStore.getJob` / `getEvents`. `npm run doctor` exits nonzero only for failed checks; warnings cover optional/non-blocking issues such as skipped network checks or a dirty vault worktree.
 
 ## systemd install
 
