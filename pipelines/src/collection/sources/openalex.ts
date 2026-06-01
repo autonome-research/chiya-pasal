@@ -6,6 +6,7 @@ import {
   type SourceContext,
   type SourceRunResult,
 } from '../source-adapter.js';
+import { fetchJson, healthWarnings } from '../fetch.js';
 
 export interface OpenAlexSourceConfig {
   query: string;
@@ -16,13 +17,11 @@ export interface OpenAlexSourceConfig {
 export const openAlexSource: SourceAdapter<OpenAlexSourceConfig> = {
   name: 'openalex',
   async fetch(config: OpenAlexSourceConfig, ctx: SourceContext): Promise<SourceRunResult> {
-    const fetchImpl = ctx.fetch ?? globalThis.fetch;
-    const url = buildOpenAlexUrl(config);
-    const res = await fetchImpl(url, { signal: ctx.signal, headers: { 'user-agent': 'chiya-collector/0.1' } });
-    if (!res.ok) return { candidates: [], report: makeReport('openalex', { warnings: [`http ${res.status}`] }) };
-    const data = await res.json() as OpenAlexResponse;
+    const fetched = await fetchJson<OpenAlexResponse>({ source: 'openalex', url: buildOpenAlexUrl(config), ctx });
+    if (!fetched.ok) return { candidates: [], report: fetched.report };
+    const data = fetched.value;
     const candidates = parseOpenAlex(data, config.field);
-    return { candidates, report: makeReport('openalex', { fetched: data.results?.length ?? 0, emitted: candidates.length }) };
+    return { candidates, report: makeReport('openalex', { fetched: data.results?.length ?? 0, emitted: candidates.length, warnings: healthWarnings(fetched.attempts, fetched.elapsedMs) }) };
   },
 };
 

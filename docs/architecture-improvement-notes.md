@@ -173,8 +173,9 @@ pipelines/src/collection/
 
 Remaining collection work:
 
-- add per-source health/quality reporting beyond fetched/emitted/dropped counts
-- add richer parser fixtures for every source-specific response shape
+- per-source health reporting now includes elapsed time and retry attempts in source warnings
+- shared TypeScript source fetch helpers now enforce request timeout + retry policy
+- add richer parser fixtures for every source-specific response shape (started for OpenAlex, CrossRef, Semantic Scholar, and legacy academic representative parsers)
 - eventually decide whether `filter_matcha.py` should also move to TypeScript
 
 ### 8. Source addition is becoming a first-class extension path
@@ -247,7 +248,7 @@ Future goals:
 - per-source fetch/parse/normalize tests
 - standard `ArticleCandidate` schema
 - structured source quality reports
-- source-level retries, rate limits, and backoff
+- source-level retries, rate limits, and backoff (started: retryable HTTP failures + per-request timeouts; full rate-limit scheduling remains open)
 - duplicate handling based on canonical IDs: DOI, arXiv ID, URL hash, title similarity
 - optional source confidence/quality scoring
 - machine-native JSONL output plus human-readable Markdown digest

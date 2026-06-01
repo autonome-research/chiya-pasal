@@ -10,7 +10,7 @@ Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](http
 | `librarian` | live (v3 router → scouts → reviewer flow) | every 10 min (drain mode); switch to 30 min once `pending` clears |
 | `digest` | live | 06:30 / 18:30 local |
 
-349 tests, all green. `npm test`, `npm run build`.
+356 tests, all green. `npm test`, `npm run build`.
 
 ## Setup
 
@@ -36,6 +36,8 @@ npm run build
 | `TOOLS_INFERENCE_MODEL` | `gemma4:26b` | Used by librarian router + scouts + reviewer. `26b` because `e4b` confabulated tool calls without actually invoking them. |
 | `THREAD_PHASE_DB` | `<VAULT_DIR>/.chiya-pipelines.db` | Shared SQLite for both `article` and `job` tables |
 | `CHIYA_FAST_MAX_TOKENS` | `4000` | Output-token cap for fast-tier digest classify/draft calls. Raised for reasoning models that otherwise spend the full cap on hidden reasoning and return `finishReason: length`. |
+| `CHIYA_SOURCE_TIMEOUT_MS` | `15000` | Per-request timeout for TypeScript API source adapters |
+| `CHIYA_SOURCE_RETRIES` | `1` | Retry count for retryable source HTTP failures (`408`, `429`, `5xx`) |
 
 The default `localhost:11435` is the SSH tunnel installed via `chiya-tunnel-tiny.service` (forwards to tiny-emerson:11434).
 
@@ -98,7 +100,7 @@ The live matcha collector calls the TypeScript API ingest from `matcha/scripts/c
 - `matcha/scripts/api-articles.jsonl`
 - `matcha/scripts/api-digest.md`
 
-`CHIYA_MATCHA_DIR` can override the computed `matcha/` path for tests or non-standard deployments. Registered API adapters now cover the legacy Python collector's active public endpoints: Semantic Scholar, OpenAlex, Crossref, arXiv, Zenodo, DOAJ, Europe PMC, INSPIRE-HEP, NCBI/PubMed, and OSF.
+`CHIYA_MATCHA_DIR` can override the computed `matcha/` path for tests or non-standard deployments. Registered API adapters now cover the legacy Python collector's active public endpoints: Semantic Scholar, OpenAlex, Crossref, arXiv, Zenodo, DOAJ, Europe PMC, INSPIRE-HEP, NCBI/PubMed, and OSF. Source HTTP calls use shared timeout/retry handling and report `health:elapsedMs` / `health:attempts` entries in `api-digest.md` source-health warnings.
 
 ### intake.ts
 

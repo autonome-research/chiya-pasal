@@ -20,6 +20,8 @@ import type { SourceAdapter } from '../source-adapter.js';
 export const mySource: SourceAdapter<MyConfig> = {
   name: 'my-source',
   async fetch(config, ctx) {
+    // Prefer shared helpers from ../fetch.js so source calls get consistent
+    // timeout/retry behavior and health warnings.
     return {
       candidates: [/* ArticleCandidate[] */],
       report: { source: 'my-source', fetched: 1, emitted: 1, dropped: 0, warnings: [] },
@@ -33,7 +35,8 @@ Rules:
 - emit `ArticleCandidate` objects, not vault pages
 - normalize title/url/source fields
 - include canonical identifiers when available (`doi`, `arxivId`)
-- return a source health report with fetched/emitted/dropped counts
+- return a source health report with fetched/emitted/dropped counts plus relevant warnings
+- use shared source fetch helpers for timeout/retry behavior unless the source requires custom protocol handling
 - test parsing with local fixtures, not live network calls
 - keep the live Markdown-first collector behavior unchanged until a deliberate migration decision
 

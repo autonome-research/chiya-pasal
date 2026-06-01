@@ -6,6 +6,7 @@ import {
   type SourceContext,
   type SourceRunResult,
 } from '../source-adapter.js';
+import { fetchJson, healthWarnings } from '../fetch.js';
 
 export interface SemanticScholarSourceConfig {
   query: string;
@@ -16,12 +17,11 @@ export interface SemanticScholarSourceConfig {
 export const semanticScholarSource: SourceAdapter<SemanticScholarSourceConfig> = {
   name: 'semantic-scholar',
   async fetch(config: SemanticScholarSourceConfig, ctx: SourceContext): Promise<SourceRunResult> {
-    const fetchImpl = ctx.fetch ?? globalThis.fetch;
-    const res = await fetchImpl(buildSemanticScholarUrl(config), { signal: ctx.signal, headers: { 'user-agent': 'chiya-collector/0.1' } });
-    if (!res.ok) return { candidates: [], report: makeReport('semantic-scholar', { warnings: [`http ${res.status}`] }) };
-    const data = await res.json() as SemanticScholarResponse;
+    const fetched = await fetchJson<SemanticScholarResponse>({ source: 'semantic-scholar', url: buildSemanticScholarUrl(config), ctx });
+    if (!fetched.ok) return { candidates: [], report: fetched.report };
+    const data = fetched.value;
     const candidates = parseSemanticScholar(data, config.field);
-    return { candidates, report: makeReport('semantic-scholar', { fetched: data.data?.length ?? 0, emitted: candidates.length }) };
+    return { candidates, report: makeReport('semantic-scholar', { fetched: data.data?.length ?? 0, emitted: candidates.length, warnings: healthWarnings(fetched.attempts, fetched.elapsedMs) }) };
   },
 };
 

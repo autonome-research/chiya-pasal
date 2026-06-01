@@ -6,6 +6,7 @@ import {
   type SourceContext,
   type SourceRunResult,
 } from '../source-adapter.js';
+import { fetchJson, healthWarnings } from '../fetch.js';
 
 export interface CrossrefSourceConfig {
   query: string;
@@ -16,12 +17,11 @@ export interface CrossrefSourceConfig {
 export const crossrefSource: SourceAdapter<CrossrefSourceConfig> = {
   name: 'crossref',
   async fetch(config: CrossrefSourceConfig, ctx: SourceContext): Promise<SourceRunResult> {
-    const fetchImpl = ctx.fetch ?? globalThis.fetch;
-    const res = await fetchImpl(buildCrossrefUrl(config), { signal: ctx.signal, headers: { 'user-agent': 'chiya-collector/0.1' } });
-    if (!res.ok) return { candidates: [], report: makeReport('crossref', { warnings: [`http ${res.status}`] }) };
-    const data = await res.json() as CrossrefResponse;
+    const fetched = await fetchJson<CrossrefResponse>({ source: 'crossref', url: buildCrossrefUrl(config), ctx });
+    if (!fetched.ok) return { candidates: [], report: fetched.report };
+    const data = fetched.value;
     const candidates = parseCrossref(data, config.field);
-    return { candidates, report: makeReport('crossref', { fetched: data.message?.items?.length ?? 0, emitted: candidates.length }) };
+    return { candidates, report: makeReport('crossref', { fetched: data.message?.items?.length ?? 0, emitted: candidates.length, warnings: healthWarnings(fetched.attempts, fetched.elapsedMs) }) };
   },
 };
 

@@ -8,6 +8,7 @@ import {
   type SourceContext,
   type SourceRunResult,
 } from '../source-adapter.js';
+import { fetchText, healthWarnings } from '../fetch.js';
 
 export interface ArxivSourceConfig {
   /** arXiv search query, e.g. `cat:cs.AI OR cat:cs.LG`. */
@@ -23,19 +24,10 @@ const DEFAULT_MAX_RESULTS = 25;
 export const arxivSource: SourceAdapter<ArxivSourceConfig> = {
   name: 'arxiv',
   async fetch(config: ArxivSourceConfig, ctx: SourceContext): Promise<SourceRunResult> {
-    const fetchImpl = ctx.fetch ?? globalThis.fetch;
-    if (!fetchImpl) throw new Error('fetch is unavailable');
+    const fetched = await fetchText({ source: 'arxiv', url: buildArxivApiUrl(config), ctx });
+    if (!fetched.ok) return { candidates: [], report: fetched.report };
 
-    const url = buildArxivApiUrl(config);
-    const res = await fetchImpl(url, { signal: ctx.signal, headers: { 'user-agent': 'chiya-collector/0.1' } });
-    if (!res.ok) {
-      return {
-        candidates: [],
-        report: makeReport('arxiv', { warnings: [`http ${res.status}`] }),
-      };
-    }
-
-    const xml = await res.text();
+    const xml = fetched.value;
     const candidates = parseArxivAtom(xml, config.field);
     return {
       candidates,
@@ -43,6 +35,7 @@ export const arxivSource: SourceAdapter<ArxivSourceConfig> = {
         fetched: candidates.length,
         emitted: candidates.length,
         dropped: 0,
+        warnings: healthWarnings(fetched.attempts, fetched.elapsedMs),
       }),
     };
   },

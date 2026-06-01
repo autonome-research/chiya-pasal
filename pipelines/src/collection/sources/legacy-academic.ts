@@ -6,6 +6,7 @@ import {
   type SourceContext,
   type SourceRunResult,
 } from '../source-adapter.js';
+import { fetchJson, healthWarnings } from '../fetch.js';
 
 export interface QuerySourceConfig {
   query: string;
@@ -27,12 +28,20 @@ async function fetchJsonSource(
   config: QuerySourceConfig,
   ctx: SourceContext,
 ): Promise<SourceRunResult> {
-  const fetchImpl = ctx.fetch ?? globalThis.fetch;
-  const res = await fetchImpl(url, { signal: ctx.signal, headers: { 'user-agent': 'chiya-collector/0.1' } });
-  if (!res.ok) return { candidates: [], report: makeReport(adapterName, { warnings: [`http ${res.status}`] }) };
-  const data = await res.json() as unknown;
-  const candidates = parser(data, config.field);
-  return { candidates, report: makeReport(adapterName, { fetched: candidates.length, emitted: candidates.length, warnings: displayName === adapterName ? [] : [`source=${displayName}`] }) };
+  const fetched = await fetchJson<unknown>({ source: adapterName, url, ctx });
+  if (!fetched.ok) return { candidates: [], report: fetched.report };
+  const candidates = parser(fetched.value, config.field);
+  return {
+    candidates,
+    report: makeReport(adapterName, {
+      fetched: candidates.length,
+      emitted: candidates.length,
+      warnings: [
+        ...(displayName === adapterName ? [] : [`source=${displayName}`]),
+        ...healthWarnings(fetched.attempts, fetched.elapsedMs),
+      ],
+    }),
+  };
 }
 
 function parseDate(value: unknown): Date | undefined {
@@ -194,17 +203,16 @@ export function parseInspireHep(data: unknown, fallbackField = 'Physics'): Artic
 export const ncbiSource: SourceAdapter<QuerySourceConfig> = {
   name: 'ncbi',
   async fetch(config, ctx) {
-    const fetchImpl = ctx.fetch ?? globalThis.fetch;
-    const searchRes = await fetchImpl(buildNcbiSearchUrl(config), { signal: ctx.signal, headers: { 'user-agent': 'chiya-collector/0.1' } });
-    if (!searchRes.ok) return { candidates: [], report: makeReport('ncbi', { warnings: [`http ${searchRes.status}`] }) };
-    const search = await searchRes.json() as { esearchresult?: { idlist?: string[] } };
-    const ids = (search.esearchresult?.idlist ?? []).slice(0, clampMax(config.maxResults));
-    if (ids.length === 0) return { candidates: [], report: makeReport('ncbi') };
-    const summaryRes = await fetchImpl(buildNcbiSummaryUrl(ids), { signal: ctx.signal, headers: { 'user-agent': 'chiya-collector/0.1' } });
-    if (!summaryRes.ok) return { candidates: [], report: makeReport('ncbi', { fetched: ids.length, warnings: [`summary http ${summaryRes.status}`] }) };
-    const summary = await summaryRes.json() as unknown;
-    const candidates = parseNcbiSummary(summary, config.field);
-    return { candidates, report: makeReport('ncbi', { fetched: ids.length, emitted: candidates.length }) };
+    const searchFetched = await fetchJson<{ esearchresult?: { idlist?: string[] } }>({ source: 'ncbi', url: buildNcbiSearchUrl(config), ctx });
+    if (!searchFetched.ok) return { candidates: [], report: searchFetched.report };
+    const ids = (searchFetched.value.esearchresult?.idlist ?? []).slice(0, clampMax(config.maxResults));
+    if (ids.length === 0) {
+      return { candidates: [], report: makeReport('ncbi', { warnings: healthWarnings(searchFetched.attempts, searchFetched.elapsedMs) }) };
+    }
+    const summaryFetched = await fetchJson<unknown>({ source: 'ncbi', url: buildNcbiSummaryUrl(ids), ctx });
+    if (!summaryFetched.ok) return { candidates: [], report: makeReport('ncbi', { fetched: ids.length, warnings: [`summary failed`, ...summaryFetched.report.warnings] }) };
+    const candidates = parseNcbiSummary(summaryFetched.value, config.field);
+    return { candidates, report: makeReport('ncbi', { fetched: ids.length, emitted: candidates.length, warnings: [...healthWarnings(searchFetched.attempts + summaryFetched.attempts - 1, searchFetched.elapsedMs + summaryFetched.elapsedMs)] }) };
   },
 };
 
