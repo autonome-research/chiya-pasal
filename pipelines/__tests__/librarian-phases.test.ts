@@ -4,6 +4,7 @@ import {
   batchEnrich,
   batchExtractRefs,
   htmlToText,
+  loadBatch,
   shouldFetch,
 } from '../src/phases/librarian-phases.js';
 import type {
@@ -11,7 +12,7 @@ import type {
   ExtractedRefs,
   LibrarianCtx,
 } from '../src/shared/librarian-types.js';
-import type { ArticleRow } from '../src/shared/article-store.js';
+import type { ArticleRow, ArticleStore } from '../src/shared/article-store.js';
 
 // Drain a phase generator, collecting yielded events. Ignores typing of the
 // event union — we only care about basic shape in these tests.
@@ -49,6 +50,28 @@ function mkRow(over: Partial<ArticleRow>): ArticleRow {
     ...over,
   };
 }
+
+describe('loadBatch', () => {
+  it('dry-run mode lists pending rows without marking them processing', async () => {
+    const row = mkRow({ id: 42 });
+    let markedProcessing = false;
+    const store = {
+      listPending: () => [row],
+      markProcessing: () => { markedProcessing = true; },
+      countByStatus: () => ({ pending: 1, processing: 0, done: 0, skipped: 0, failed: 0 }),
+    } as unknown as ArticleStore;
+    const ctx = makeCtx({ dryRun: true });
+    const events = await drain(loadBatch(store, { dryRun: true }).run(ctx));
+
+    expect(ctx.batch).toEqual([row]);
+    expect(markedProcessing).toBe(false);
+    expect(events.at(-1)).toMatchObject({
+      type: 'phase',
+      phase: 'load-batch',
+      counts: { batch: 1, totalPending: 1, dryRun: 1 },
+    });
+  });
+});
 
 describe('htmlToText', () => {
   it('strips <script> blocks (with content)', () => {

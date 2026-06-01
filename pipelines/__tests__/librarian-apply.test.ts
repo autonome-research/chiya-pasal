@@ -132,6 +132,60 @@ describe('applyArticlePlans', () => {
     expect(store.getById(b.id)?.status).toBe('failed');
   });
 
+  it('dry-run previews writes without touching vault files or article status', async () => {
+    const a = insertArticle('Preview paper', 'https://arxiv.org/abs/2605.00006');
+    const topicBefore = await vault.read('wiki/topics/llm-evaluation.md');
+    const plan = planned(a);
+    const ctx = ctxWith([{ articleId: a.id, outcome: 'planned', plan }]);
+
+    const events = await drain(applyArticlePlans(vault, store, { dryRun: true }).run(ctx));
+
+    expect(ctx.dryRunPreviews?.[0]).toMatchObject({
+      articleId: a.id,
+      outcome: 'would-write',
+      sourcePagePath: plan.sourcePath,
+      topicPagePaths: ['wiki/topics/llm-evaluation.md'],
+    });
+    expect(ctx.results?.[0]).toMatchObject({ outcome: 'done', reason: 'dry-run' });
+    expect(events.at(-1)).toMatchObject({ type: 'phase', phase: 'preview-article-plans' });
+    expect(await vault.exists(plan.sourcePath)).toBe(false);
+    expect(await vault.read('wiki/topics/llm-evaluation.md')).toBe(topicBefore);
+    expect(store.getById(a.id)?.status).toBe('processing');
+  });
+
+  it('dry-run validates escaped source paths as would-fail', async () => {
+    const a = insertArticle('Invalid preview paper', 'https://arxiv.org/abs/2605.00007');
+    const badPlan = planned(a);
+    badPlan.sourcePath = '../../../escape.md';
+    const ctx = ctxWith([{ articleId: a.id, outcome: 'planned', plan: badPlan }]);
+
+    await drain(applyArticlePlans(vault, store, { dryRun: true }).run(ctx));
+
+    expect(ctx.dryRunPreviews?.[0]).toMatchObject({
+      articleId: a.id,
+      outcome: 'would-fail',
+    });
+    expect(ctx.dryRunPreviews?.[0]?.reason).toContain('escapes root');
+    expect(store.getById(a.id)?.status).toBe('processing');
+  });
+
+  it('dry-run previews already-ingested recovery without changing status', async () => {
+    const a = insertArticle('Preview recovered paper', 'https://arxiv.org/abs/2605.00008');
+    const plan = planned(a);
+    await vault.write(plan.sourcePath, `---\ntype: source\nurl: ${a.url}\n---\n\n# ${a.title}\n`);
+    const ctx = ctxWith([{ articleId: a.id, outcome: 'skipped', reason: 'already-ingested', sourcePath: plan.sourcePath }]);
+
+    await drain(applyArticlePlans(vault, store, { dryRun: true }).run(ctx));
+
+    expect(ctx.dryRunPreviews?.[0]).toMatchObject({
+      articleId: a.id,
+      outcome: 'would-skip',
+      reason: 'existing-source-recovered',
+      sourcePagePath: plan.sourcePath,
+    });
+    expect(store.getById(a.id)?.status).toBe('processing');
+  });
+
   it('recovers a matching existing source page as done instead of skipping', async () => {
     const a = insertArticle('Recovered paper', 'https://arxiv.org/abs/2605.00005');
     const plan = planned(a);

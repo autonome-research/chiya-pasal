@@ -65,9 +65,21 @@ export type ArticlePlanResult =
   | { articleId: number; outcome: 'failed'; reason: string }
   | { articleId: number; outcome: 'deferred'; reason: string };
 
+export interface DryRunArticlePreview {
+  articleId: number;
+  outcome: 'would-write' | 'would-skip' | 'would-fail' | 'would-defer';
+  reason?: string;
+  sourcePagePath?: string;
+  topicPagePaths: string[];
+  backlinkPagePaths: string[];
+  logEntry?: string;
+}
+
 export interface LibrarianCtx extends BasePipelineContext {
   readonly batchSize: number;
   readonly signal: AbortSignal;
+  /** True when the run may call agents/read vault state but must not mutate the vault, git, or ArticleStore rows. */
+  readonly dryRun?: boolean;
 
   // Set by reapStale.
   reaped?: number;
@@ -86,4 +98,7 @@ export interface LibrarianCtx extends BasePipelineContext {
 
   // Set by the serial deterministic apply phase.
   results?: ArticleResult[];
+
+  // Set by dry-run apply preview.
+  dryRunPreviews?: DryRunArticlePreview[];
 }

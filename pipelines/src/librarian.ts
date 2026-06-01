@@ -3,10 +3,11 @@
  * ArticleStore, runs each through router → 4 parallel scouts → reviewer →
  * deterministic write, and emits source/topic/backlink pages into the vault.
  *
- * Usage: tsx src/librarian.ts [--batch=N] [--minutes=M]
+ * Usage: tsx src/librarian.ts [--batch=N] [--minutes=M] [--dry-run|--plan-only]
  *
  * Defaults: batch=10 articles, soft deadline of 8 minutes (matches the
- * systemd timer cadence).
+ * systemd timer cadence). Dry-run mode calls agents and previews deterministic
+ * apply results, but does not mutate vault files, git, or article row status.
  */
 
 import {
@@ -38,18 +39,33 @@ import type { LibrarianCtx } from './shared/librarian-types.js';
 interface Args {
   batchSize: number;
   minutes: number;
+  dryRun: boolean;
+  planOnly: boolean;
 }
 
 function parseArgs(): Args {
   let batchSize = 10;
   let minutes = 8;
+  let dryRun = false;
+  let planOnly = false;
   for (const arg of process.argv.slice(2)) {
+    if (arg === '--dry-run' || arg === '--preview') {
+      dryRun = true;
+      continue;
+    }
+    if (arg === '--plan-only') {
+      dryRun = true;
+      planOnly = true;
+      continue;
+    }
     const m = /^--(batch|minutes)=(\d+)$/.exec(arg);
-    if (!m) continue;
+    if (!m) {
+      throw new Error(`unknown librarian argument: ${arg}`);
+    }
     if (m[1] === 'batch') batchSize = parseInt(m[2]!, 10);
     if (m[1] === 'minutes') minutes = parseInt(m[2]!, 10);
   }
-  return { batchSize, minutes };
+  return { batchSize, minutes, dryRun, planOnly };
 }
 
 function clientFor(target: InferenceTarget): OpenAI {
@@ -57,12 +73,12 @@ function clientFor(target: InferenceTarget): OpenAI {
 }
 
 async function main(): Promise<void> {
-  const { batchSize, minutes } = parseArgs();
+  const { batchSize, minutes, dryRun, planOnly } = parseArgs();
   const env = loadChiyaEnv();
   const dbPath = process.env.THREAD_PHASE_DB ?? `${env.vaultDir}/.chiya-pipelines.db`;
 
   console.log(
-    `[librarian] vault=${env.vaultDir} db=${dbPath} batch=${batchSize} minutes=${minutes}\n` +
+    `[librarian] vault=${env.vaultDir} db=${dbPath} batch=${batchSize} minutes=${minutes} mode=${planOnly ? 'plan-only' : dryRun ? 'dry-run' : 'apply'}\n` +
       `            tools:   ${env.tools.baseUrl}/${env.tools.model}\n` +
       `            summary: ${env.fast.baseUrl}/${env.fast.model}`,
   );
@@ -88,13 +104,14 @@ async function main(): Promise<void> {
     cache: new PipelineCache(),
     batchSize,
     signal: deadlineController.signal,
+    dryRun,
   };
 
   // Tools tier (gemma4:26b) for router + scouts + reviewer; fast tier
   // (gemma4:e4b) for the per-article summary call.
-  const phases = [
-    reapStale(store),
-    loadBatch(store),
+  const planningPhases = [
+    ...(dryRun ? [] : [reapStale(store)]),
+    loadBatch(store, { dryRun }),
     batchEnrich(),
     batchExtractRefs(),
     planArticleTree(
@@ -107,19 +124,26 @@ async function main(): Promise<void> {
       vault,
       store,
     ),
-    withVaultMutationLock(
-      vaultMutationLock,
-      [applyArticlePlans(vault, store), mergeMetadata(vault), commitLocal(git)],
-      'librarian-vault-mutation',
-    ),
   ];
+  const phases = planOnly
+    ? planningPhases
+    : dryRun
+      ? [...planningPhases, applyArticlePlans(vault, store, { dryRun: true })]
+      : [
+          ...planningPhases,
+          withVaultMutationLock(
+            vaultMutationLock,
+            [applyArticlePlans(vault, store), mergeMetadata(vault), commitLocal(git)],
+            'librarian-vault-mutation',
+          ),
+        ];
 
   // Clear orphaned lock rows from a previous crashed run (systemd hard-kills
   // at 20 min; anything older than 30 min is unambiguously dead).
   const swept = sweepStaleJobLock(dbPath, 'chiya-librarian', 30);
   if (swept > 0) console.log(`[librarian] swept ${swept} stale lock row(s)`);
 
-  const jobId = jobStore.acquireExclusive('chiya-librarian', { batchSize, minutes });
+  const jobId = jobStore.acquireExclusive('chiya-librarian', { batchSize, minutes, dryRun, planOnly });
   if (!jobId) {
     console.log('[librarian] another run already in flight — exiting cleanly');
     clearTimeout(deadlineTimer);
@@ -139,7 +163,10 @@ async function main(): Promise<void> {
   try {
     await runner.run(jobId, phases, ctx, () => ({
       batchSize,
-      processed: ctx.results?.length ?? 0,
+      processed: ctx.results?.length ?? ctx.articlePlans?.length ?? 0,
+      dryRun,
+      planOnly,
+      preview: ctx.dryRunPreviews?.length ?? 0,
       counts: store.countByStatus(),
     }));
   } finally {

@@ -13,6 +13,7 @@ import { requireCtx, type Phase } from 'thread-phase';
 import { ArticleStore } from '../shared/article-store.js';
 import type {
   ArticleResult,
+  DryRunArticlePreview,
   LibrarianCtx,
   PlannedArticle,
 } from '../shared/librarian-types.js';
@@ -63,6 +64,21 @@ function sourcePageMatchesArticle(content: string, plan: PlannedArticle): boolea
   if (url && content.includes(`url: ${url}`)) return true;
   if (content.includes(`# ${plan.article.title}`)) return true;
   return false;
+}
+
+function gateNoteFromStats(gateStats: {
+  foldedSlugs: number;
+  droppedHallucinations: number;
+  rejectedNearDuplicates: number;
+  rejectedThinDefinition: number;
+}): string {
+  return gateStats.foldedSlugs +
+    gateStats.droppedHallucinations +
+    gateStats.rejectedNearDuplicates +
+    gateStats.rejectedThinDefinition >
+    0
+    ? ` [gate: fold=${gateStats.foldedSlugs} drop=${gateStats.droppedHallucinations} dup=${gateStats.rejectedNearDuplicates} thin=${gateStats.rejectedThinDefinition}]`
+    : '';
 }
 
 async function applyPlannedArticle(
@@ -191,14 +207,7 @@ async function applyPlannedArticle(
 
     const ts = new Date().toISOString().slice(0, 16).replace('T', ' ');
     const slugSummary = gated.existingTopicSlugs.join(', ') || '(no topics)';
-    const gateNote =
-      gated.gateStats.foldedSlugs +
-        gated.gateStats.droppedHallucinations +
-        gated.gateStats.rejectedNearDuplicates +
-        gated.gateStats.rejectedThinDefinition >
-      0
-        ? ` [gate: fold=${gated.gateStats.foldedSlugs} drop=${gated.gateStats.droppedHallucinations} dup=${gated.gateStats.rejectedNearDuplicates} thin=${gated.gateStats.rejectedThinDefinition}]`
-        : '';
+    const gateNote = gateNoteFromStats(gated.gateStats);
 
     return {
       articleId: plan.article.id,
@@ -222,10 +231,182 @@ async function applyPlannedArticle(
   }
 }
 
-export const applyArticlePlans = (vault: VaultFs, store: ArticleStore): Phase<LibrarianCtx> => ({
-  name: 'apply-article-plans',
+async function previewPlannedArticle(
+  plan: PlannedArticle,
+  vault: VaultFs,
+): Promise<DryRunArticlePreview> {
+  try {
+    // readOptional validates the path through VaultFs' sandbox guard while
+    // still allowing the normal "file does not exist yet" preview path.
+    const existingSource = await vault.readOptional(plan.sourcePath);
+    if (existingSource !== null) {
+      return {
+        articleId: plan.article.id,
+        outcome: 'would-skip',
+        reason: sourcePageMatchesArticle(existingSource, plan)
+          ? 'existing-source-recovered'
+          : 'already-ingested',
+        sourcePagePath: plan.sourcePath,
+        topicPagePaths: [],
+        backlinkPagePaths: [],
+      };
+    }
+
+    const topicPaths = await vault.list('wiki/topics/*.md');
+    const existingTopicSlugs = new Set(topicPaths.map((p) => basename(p, '.md')));
+    const gated = await applyReconcileAndGate({
+      reviewer: plan.reviewer,
+      existingTopicSlugs,
+      sourceExists: (filename) => vault.exists(`wiki/sources/${filename}.md`),
+      entityExists: (slug) => vault.exists(`wiki/entities/${slug}.md`),
+    });
+
+    const topicPagePaths: string[] = [];
+    const newTopicsBySlug = new Map(gated.newTopicsToCreate.map((t) => [t.slug, t.definition]));
+    for (const slug of gated.existingTopicSlugs) {
+      if (slug === 'uncategorized') continue;
+      const topicPath = `wiki/topics/${slug}.md`;
+      const newDef = newTopicsBySlug.get(slug);
+      const existingTopic = await vault.readOptional(topicPath);
+      if (newDef || existingTopic !== null) topicPagePaths.push(topicPath);
+    }
+
+    const backlinkPagePaths: string[] = [];
+    const backlinkWouldChange = async (path: string): Promise<void> => {
+      if (!(await vault.exists(path))) return;
+      const existing = await vault.read(path);
+      const updated = appendCitedBy(existing, {
+        filename: plan.sourceFilename,
+        title: plan.article.title,
+      });
+      if (updated !== existing) backlinkPagePaths.push(path);
+    };
+    for (const citeFilename of gated.citeFilenames) {
+      await backlinkWouldChange(`wiki/sources/${citeFilename}.md`);
+    }
+    for (const entitySlug of gated.entitySlugs) {
+      await backlinkWouldChange(`wiki/entities/${entitySlug}.md`);
+    }
+
+    const ts = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    const slugSummary = gated.existingTopicSlugs.join(', ') || '(no topics)';
+    return {
+      articleId: plan.article.id,
+      outcome: 'would-write',
+      sourcePagePath: plan.sourcePath,
+      topicPagePaths,
+      backlinkPagePaths,
+      logEntry: `[${ts}] ingest-v3 | ${plan.article.title.slice(0, 80)} → ${slugSummary}${gateNoteFromStats(gated.gateStats)}`,
+    };
+  } catch (err) {
+    return {
+      articleId: plan.article.id,
+      outcome: 'would-fail',
+      reason: (err instanceof Error ? err.message : String(err)).slice(0, 200),
+      topicPagePaths: [],
+      backlinkPagePaths: [],
+    };
+  }
+}
+
+async function previewSkippedPlan(
+  result: { articleId: number; reason: string; sourcePath?: string },
+  vault: VaultFs,
+  store: ArticleStore,
+): Promise<DryRunArticlePreview> {
+  try {
+    if (result.reason === 'already-ingested' && result.sourcePath) {
+      const row = store.getById(result.articleId);
+      const content = await vault.readOptional(result.sourcePath);
+      if (row && content && ((row.url && content.includes(`url: ${row.url}`)) || content.includes(`# ${row.title}`))) {
+        return {
+          articleId: result.articleId,
+          outcome: 'would-skip',
+          reason: 'existing-source-recovered',
+          sourcePagePath: result.sourcePath,
+          topicPagePaths: [],
+          backlinkPagePaths: [],
+        };
+      }
+    }
+    return {
+      articleId: result.articleId,
+      outcome: 'would-skip',
+      reason: result.reason,
+      sourcePagePath: result.sourcePath,
+      topicPagePaths: [],
+      backlinkPagePaths: [],
+    };
+  } catch (err) {
+    return {
+      articleId: result.articleId,
+      outcome: 'would-fail',
+      reason: (err instanceof Error ? err.message : String(err)).slice(0, 200),
+      topicPagePaths: [],
+      backlinkPagePaths: [],
+    };
+  }
+}
+
+export interface ApplyArticlePlansOptions {
+  /** Re-run gates and report what would happen without vault/DB mutation. */
+  dryRun?: boolean;
+}
+
+export const applyArticlePlans = (
+  vault: VaultFs,
+  store: ArticleStore,
+  options: ApplyArticlePlansOptions = {},
+): Phase<LibrarianCtx> => ({
+  name: options.dryRun ? 'preview-article-plans' : 'apply-article-plans',
   async *run(ctx) {
     const plans = requireCtx(ctx, 'articlePlans', 'apply-article-plans');
+    const dryRun = options.dryRun ?? ctx.dryRun ?? false;
+
+    if (dryRun) {
+      const previews: DryRunArticlePreview[] = [];
+      for (const result of plans) {
+        if (result.outcome === 'planned') {
+          previews.push(await previewPlannedArticle(result.plan, vault));
+        } else if (result.outcome === 'deferred') {
+          previews.push({ articleId: result.articleId, outcome: 'would-defer', reason: result.reason, topicPagePaths: [], backlinkPagePaths: [] });
+        } else if (result.outcome === 'skipped') {
+          previews.push(await previewSkippedPlan(result, vault, store));
+        } else {
+          previews.push({ articleId: result.articleId, outcome: 'would-fail', reason: result.reason, topicPagePaths: [], backlinkPagePaths: [] });
+        }
+      }
+      ctx.dryRunPreviews = previews;
+      ctx.results = previews.map((p): ArticleResult => ({
+        articleId: p.articleId,
+        outcome: p.outcome === 'would-write' ? 'done' : p.outcome === 'would-fail' ? 'failed' : 'skipped',
+        reason: p.reason ?? 'dry-run',
+        sourcePagePath: p.sourcePagePath,
+        topicPagePaths: p.topicPagePaths,
+        backlinkPagePaths: p.backlinkPagePaths,
+        logEntry: p.logEntry,
+      }));
+      const tally = previews.reduce(
+        (acc, r) => { acc[r.outcome] = (acc[r.outcome] ?? 0) + 1; return acc; },
+        { 'would-write': 0, 'would-skip': 0, 'would-fail': 0, 'would-defer': 0 } as Record<string, number>,
+      );
+      for (const p of previews) {
+        yield {
+          type: 'agent_activity',
+          agent: 'preview-article-plans',
+          action: p.outcome,
+          detail: `article=${p.articleId}${p.sourcePagePath ? ` source=${p.sourcePagePath}` : ''}${p.reason ? ` reason=${p.reason}` : ''}`,
+        };
+      }
+      yield {
+        type: 'phase',
+        phase: 'preview-article-plans',
+        detail: `would-write=${tally['would-write']} would-skip=${tally['would-skip']} would-fail=${tally['would-fail']} would-defer=${tally['would-defer']}`,
+        counts: tally,
+      };
+      return;
+    }
+
     const results: ArticleResult[] = [];
 
     for (const result of plans) {

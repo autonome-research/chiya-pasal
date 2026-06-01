@@ -54,20 +54,31 @@ export const reapStale = (store: ArticleStore): Phase<LibrarianCtx> => ({
   },
 });
 
-export const loadBatch = (store: ArticleStore): Phase<LibrarianCtx> => ({
+export interface LoadBatchOptions {
+  /** Preview pending rows without moving them to processing. */
+  dryRun?: boolean;
+}
+
+export const loadBatch = (store: ArticleStore, options: LoadBatchOptions = {}): Phase<LibrarianCtx> => ({
   name: 'load-batch',
   async *run(ctx) {
+    const dryRun = options.dryRun ?? ctx.dryRun ?? false;
     const batch = store.listPending(ctx.batchSize);
     ctx.batch = batch;
-    for (const row of batch) store.markProcessing(row.id);
+    if (!dryRun) {
+      for (const row of batch) store.markProcessing(row.id);
+    }
     if (batch.length === 0) ctx.stop = { reason: 'queue-empty' };
     yield {
       type: 'phase',
       phase: 'load-batch',
-      detail: `${batch.length} article(s) pulled (status='processing')`,
+      detail: dryRun
+        ? `${batch.length} article(s) previewed (status left as 'pending')`
+        : `${batch.length} article(s) pulled (status='processing')`,
       counts: {
         batch: batch.length,
-        totalPending: store.countByStatus().pending + batch.length,
+        totalPending: store.countByStatus().pending + (dryRun ? 0 : batch.length),
+        dryRun: dryRun ? 1 : 0,
       },
     };
   },
@@ -279,6 +290,15 @@ export const mergeMetadata = (vault: VaultFs): Phase<LibrarianCtx> => ({
   name: 'merge-metadata',
   async *run(ctx) {
     const results = requireCtx(ctx, 'results', 'merge-metadata');
+    if (ctx.dryRun) {
+      yield {
+        type: 'phase',
+        phase: 'merge-metadata',
+        detail: 'dry-run: skipped log.md append',
+        counts: { log: 0, dryRun: 1 },
+      };
+      return;
+    }
     const logEntries = results.map((r) => r.logEntry).filter((e): e is string => Boolean(e));
     if (logEntries.length > 0) {
       const block = logEntries.map((e) => `## ${e.replace(/^## ?/, '')}`).join('\n\n');
@@ -288,7 +308,7 @@ export const mergeMetadata = (vault: VaultFs): Phase<LibrarianCtx> => ({
       type: 'phase',
       phase: 'merge-metadata',
       detail: `${logEntries.length} log entries`,
-      counts: { log: logEntries.length },
+      counts: { log: logEntries.length, dryRun: 0 },
     };
   },
 });
@@ -301,6 +321,15 @@ export const commitLocal = (git: GitOps): Phase<LibrarianCtx> => ({
   name: 'commit-local',
   async *run(ctx) {
     const results = requireCtx(ctx, 'results', 'commit-local');
+    if (ctx.dryRun) {
+      yield {
+        type: 'agent_activity',
+        agent: 'commit-local',
+        action: 'noop',
+        detail: 'dry-run: skipped git commit',
+      };
+      return;
+    }
     const tally = results.reduce(
       (acc, r) => { acc[r.outcome] = (acc[r.outcome] ?? 0) + 1; return acc; },
       { done: 0, skipped: 0, failed: 0 } as Record<string, number>,

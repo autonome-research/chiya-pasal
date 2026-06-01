@@ -34,7 +34,7 @@ Potential guardrails:
 - **Deterministic side effects:** LLMs propose structured outputs; TypeScript code performs writes, git operations, email, and DB transitions.
 - **Runtime schema validation:** every agent JSON contract is validated before downstream use.
 - **Path sandboxing:** all vault file operations must go through `VaultFs` or an equivalent root-guarded API.
-- **Dry-run mode:** side-effecting workflows should support previewing write intents, git commits, and email output.
+- **Dry-run mode:** side-effecting workflows should support previewing write intents, git commits, and email output. Librarian dry-run/plan-only support is now started.
 - **Fixtures and contract tests:** every source adapter, scout, digest section, and writer rule should have small fixtures.
 - **Explicit phase contracts:** each phase documents its required ctx fields and produced ctx fields.
 - **Least privilege by workflow:** collector, curator, digest, and publisher should each receive only the env/secrets/tools they need.
@@ -307,7 +307,7 @@ Future goals:
 
 - documented phase contracts
 - reusable templates for new pipelines
-- dry-run modes for all side-effecting phases
+- dry-run modes for all side-effecting phases (started for librarian via `--dry-run` / `--plan-only`)
 - fixtures for vault, article store, and agent outputs
 - task-sized modules that future coding agents can safely modify
 - a contributor guide explaining how to add a source, a scout, a digest section, or a vault write rule
@@ -370,7 +370,7 @@ Code should continue to:
 ### Phase 4 — reuse and agent-friendliness
 
 - add contributor/developer docs (started: `docs/developer-guide.md`)
-- add dry-run workflows
+- add dry-run workflows (started: librarian `--dry-run` and `--plan-only`)
 - add source and phase templates
 - add operational `doctor`/inspection commands
 

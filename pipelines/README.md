@@ -10,7 +10,7 @@ Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](http
 | `librarian` | live (v3 router → scouts → reviewer flow) | every 10 min (drain mode); switch to 30 min once `pending` clears |
 | `digest` | live | 06:30 / 18:30 local |
 
-342 tests, all green. `npm test`, `npm run build`.
+346 tests, all green. `npm test`, `npm run build`.
 
 ## Setup
 
@@ -46,6 +46,8 @@ set -a && source .env && set +a   # systemd loads this automatically
 
 npm run intake                    # tsx src/intake.ts
 npm run librarian                 # tsx src/librarian.ts
+npm run librarian -- --dry-run    # calls agents + previews apply; no vault/git/article status mutation
+npm run librarian -- --plan-only  # stops after semantic article plans; no apply preview
 npm run digest:am                 # tsx src/digest.ts AM
 npm run digest:pm                 # tsx src/digest.ts PM
 ```
@@ -112,6 +114,7 @@ No LLM. Idempotent — re-running on the same files inserts nothing new.
 ```
 reapStale           (pure)   reset stuck 'processing' rows (> 20 min) back to pending
 loadBatch           (pure)   pull up to N pending rows, mark as processing
+                              (--dry-run leaves rows pending)
 batchEnrich         (HTTP)   fetch full text for thin snippets, capped at 50KB
 batchExtractRefs    (pure)   regex-extract arxiv IDs + DOIs from each body
 planArticleTree     (LLM)    per-article fan-out, concurrency=4, no writes:
@@ -124,6 +127,7 @@ planArticleTree     (LLM)    per-article fan-out, concurrency=4, no writes:
                               └── summary         (fast-tier, no tools)
 applyArticlePlans   (pure)   serial revalidation + deterministic writes
                               source page + topic touches + cite/entity backlinks + related source edges + ArticleStore status
+                              (--dry-run revalidates and reports would-write/would-skip/would-fail without writes)
 mergeMetadata       (pure)   append per-article entries to vault/log.md
 commitLocal         (pure)   single git commit per run (no push — digest pushes)
 ```
