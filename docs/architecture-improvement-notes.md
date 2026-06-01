@@ -220,7 +220,7 @@ Current logs are useful, and job events are persisted. Future improvements could
 Potential additions:
 
 - source health summary per collection run
-- article lifecycle dashboard or CLI
+- article lifecycle dashboard or CLI (started: `npm run status` shows article counts + recent jobs)
 - per-source yield/drop stats
 - per-agent latency/token/tool-call stats
 - failure summaries grouped by phase/reason
@@ -373,7 +373,7 @@ Code should continue to:
 - add contributor/developer docs (started: `docs/developer-guide.md`)
 - add dry-run workflows (started: librarian `--dry-run` and `--plan-only`)
 - add source and phase templates
-- add operational `doctor`/inspection commands (started: `npm run doctor`; `status`/`jobs`/`sources --health` remain open)
+- add operational `doctor`/inspection commands (started: `npm run doctor` and `npm run status`; richer `jobs`/`sources --health` remain open)
 
 ## Open questions for discussion
 

@@ -10,7 +10,7 @@ Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](http
 | `librarian` | live (v3 router → scouts → reviewer flow) | every 10 min (drain mode); switch to 30 min once `pending` clears |
 | `digest` | live | 06:30 / 18:30 local |
 
-356 tests, all green. `npm test`, `npm run build`.
+358 tests, all green. `npm test`, `npm run build`.
 
 ## Setup
 
@@ -47,6 +47,7 @@ The default `localhost:11435` is the SSH tunnel installed via `chiya-tunnel-tiny
 set -a && source .env && set +a   # systemd loads this automatically
 
 npm run doctor -- --no-network    # validate env/vault/db/git without inference HTTP checks
+npm run status                    # article status counts + recent jobs
 npm run intake                    # tsx src/intake.ts
 npm run librarian                 # tsx src/librarian.ts
 npm run librarian -- --dry-run    # calls agents + previews apply; no vault/git/article status mutation
