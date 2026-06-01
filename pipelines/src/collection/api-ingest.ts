@@ -36,6 +36,7 @@ interface QuerySpec {
 const matchaDir = resolveMatchaDir(import.meta.url);
 const scriptsDir = resolveMatchaScriptsDir(import.meta.url);
 const maxResults = Number(process.env.API_MAX_RESULTS ?? '6');
+const sourceTimeoutMs = Math.max(500, Number(process.env.API_SOURCE_TIMEOUT_MS ?? '15000') || 15000);
 
 const QUERIES: QuerySpec[] = [
   { query: 'large language models transformer reinforcement learning', field: 'AI/ML', sources: ['semantic-scholar', 'openalex', 'arxiv', 'crossref', 'ncbi'] },
@@ -79,13 +80,20 @@ async function main(): Promise<void> {
     for (const source of spec.sources) {
       const adapter = registry.get(source);
       if (!adapter) continue;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(`source-timeout:${sourceTimeoutMs}ms`), sourceTimeoutMs);
       try {
         const query = source === 'arxiv' ? queryToArxiv(spec.query) : spec.query;
-        const result = await adapter.fetch({ query, maxResults, field: spec.field }, { now: new Date(), interests });
+        const result = await adapter.fetch(
+          { query, maxResults, field: spec.field },
+          { now: new Date(), interests, signal: controller.signal },
+        );
         candidates.push(...result.candidates);
         reports.push(result.report);
       } catch (err) {
         reports.push({ source, fetched: 0, emitted: 0, dropped: 0, warnings: [err instanceof Error ? err.message : String(err)] });
+      } finally {
+        clearTimeout(timeout);
       }
     }
   }
