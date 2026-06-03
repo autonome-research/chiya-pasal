@@ -11,7 +11,7 @@ Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](http
 | `librarian` | available (v3 router → scouts → reviewer flow) | manual/split-cadence use |
 | `digest` | available | manual/split-cadence use; email guarded once per local day by default |
 
-351 tests, all green. `npm test`, `npm run build`.
+353 tests, all green. `npm test`, `npm run build`.
 
 ## Setup
 
@@ -55,6 +55,8 @@ npm run intake                    # tsx src/intake.ts
 npm run librarian                 # tsx src/librarian.ts
 npm run digest:am                 # tsx src/digest.ts AM
 npm run digest:pm                 # tsx src/digest.ts PM
+npm run backfill-archive-articles -- --status=done     # recover dedup memory after DB loss
+npm run backfill-archive-articles -- --status=pending  # re-queue archived resources for graph curation
 ```
 
 Each run logs every event to stdout. Persisted job + event log lives in `$THREAD_PHASE_DB`. Inspect with sqlite directly or via thread-phase's `JobStore.getJob` / `getEvents`.
@@ -111,7 +113,7 @@ parseAndStore      (pure)   upsert into ArticleStore (URL + title hash dedup)
 archiveInboxFiles  (pure)   move processed files → vault/raw/inbox/archive/
 ```
 
-No LLM. Idempotent — re-running on the same files inserts nothing new.
+No LLM. Idempotent — re-running on the same files inserts nothing new. If the ArticleStore DB is ever lost/reset while raw inbox archives remain, recover dedup memory with `npm run backfill-archive-articles -- --status=done`, or re-queue archived resources for graph curation with `-- --status=pending`.
 
 ### librarian.ts
 
@@ -167,3 +169,5 @@ Two mechanisms keep a crashed run from blocking everything that follows:
 Both are tested in `__tests__/sweep-stale-job.test.ts` and `__tests__/article-store.test.ts`.
 
 3. **`VaultMutationLock`** — wraps librarian apply/metadata/commit and digest append/commit/push using an atomic lock directory under the vault root. This prevents cross-service `log.md` and git races while still allowing the expensive agent planning/classification work to run outside the lock.
+
+4. **`backfill-archive-articles`** — restores ArticleStore rows from `raw/inbox/archive/*-articles.md` after DB loss/reset. Use `--status=done` for dedup-memory recovery without graph work, or `--status=pending` when archived resources should be curated into the graph. The script preserves the original archive date from the filename so old resources do not masquerade as today's collection.

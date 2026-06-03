@@ -36,6 +36,7 @@ Rules:
 - return a source health report with fetched/emitted/dropped counts
 - test parsing with local fixtures, not live network calls
 - keep the live Markdown-first collector behavior unchanged until a deliberate migration decision
+- preserve cross-day dedup safety: the raw collector checks archived `*-articles.md` files, while ArticleStore remains the long-term dedup source of truth
 
 ## Adding or changing a digest section
 
@@ -100,4 +101,13 @@ For native binding issues after Node upgrades:
 ```bash
 npm rebuild better-sqlite3 --silent
 ```
+
+If ArticleStore is lost/reset but raw inbox archives remain, recover with:
+
+```bash
+npm run backfill-archive-articles -- --status=done     # dedup memory only
+npm run backfill-archive-articles -- --status=pending  # re-queue archived resources
+```
+
+Backfill uses archive filenames for `collected_at`, so restored historical resources do not appear as newly collected today.
 
