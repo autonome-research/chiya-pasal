@@ -67,7 +67,7 @@ ${body}`;
 
 function renderArticleCard(item: ClassifiedArticle): string {
   const article = item.article;
-  const href = sourceHref(article.url);
+  const href = sourceHref(article.url, article.source);
   const title = escapeHtml(article.title);
   const titleHtml = href
     ? `<a href="${escapeAttribute(href)}" style="font-size: 16px; font-weight: 700; color: #2563eb; text-decoration: none;">${title}</a>`
@@ -104,12 +104,15 @@ ${ingestLines.map((l) => `  <li>${escapeHtml(l)}</li>`).join('\n')}
 </ul>`;
 }
 
-export function sourceHref(rawUrl: string | null | undefined): string | null {
+export function sourceHref(rawUrl: string | null | undefined, source?: string | null): string | null {
   const url = rawUrl?.trim();
   if (!url) return null;
 
   const osf = humanOsfPreprintUrl(url);
   if (osf) return osf;
+
+  const zenodo = humanZenodoUrl(url, source);
+  if (zenodo) return zenodo;
 
   if (/^https?:\/\//i.test(url)) return url;
   if (/^doi:/i.test(url)) return `https://doi.org/${url.replace(/^doi:/i, '').trim()}`;
@@ -128,6 +131,13 @@ export function humanOsfPreprintUrl(rawUrl: string): string | null {
   } catch {
     return null;
   }
+}
+
+export function humanZenodoUrl(rawUrl: string, source?: string | null): string | null {
+  const value = rawUrl.trim();
+  if (!/^zenodo$/i.test(source ?? '')) return null;
+  if (/^\d+$/.test(value)) return `https://zenodo.org/records/${value}`;
+  return null;
 }
 
 export function escapeHtml(value: string): string {

@@ -11,7 +11,7 @@ Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](http
 | `digest` | live | 06:30 / 18:30 local |
 | `daily cycle` | optional | 09:00 local catch-up timer: collect → intake → librarian passes → digest/email |
 
-370 tests, all green. `npm test`, `npm run build`.
+371 tests, all green. `npm test`, `npm run build`.
 
 ## Setup
 
@@ -165,7 +165,7 @@ squashAndPush       (pure)   fetch → squash unpushed local commits → push to
 emailSend           (pure)   gws gmail +send (--html when HTML body is available); throws on send failure
 ```
 
-Email format: the digest keeps a Markdown/plain-text body for logs and fallback, but sends a deterministic HTML fragment when available. Article titles are rendered as embedded links to the original collected source URL; all article/model text is HTML-escaped in TypeScript, and the LLM is never asked to generate HTML. OSF API preprint URLs are converted to human-readable `https://osf.io/<slug>` links before rendering.
+Email format: the digest keeps a Markdown/plain-text body for logs and fallback, but sends a deterministic HTML fragment when available. Article titles are rendered as embedded links to the original collected source URL; all article/model text is HTML-escaped in TypeScript, and the LLM is never asked to generate HTML. OSF API preprint URLs are converted to human-readable `https://osf.io/<slug>` links, and Zenodo bare record IDs are converted to `https://zenodo.org/records/<id>` before rendering/backfill storage.
 
 Push strategy: many small local commits accumulate (librarian and digest both); the digest's `squashAndPush` rebase-squashes everything since the last push into one commit per push. Result on remote: ~2 commits/day max, each summarizing the work since the last push.
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { escapeHtml, humanOsfPreprintUrl, renderDigestEmailHtml, sourceHref } from '../src/phases/digest/render-html.js';
+import { escapeHtml, humanOsfPreprintUrl, humanZenodoUrl, renderDigestEmailHtml, sourceHref } from '../src/phases/digest/render-html.js';
 import type { ClassifiedArticle } from '../src/shared/digest-types.js';
 
 function item(overrides: Partial<ClassifiedArticle> = {}): ClassifiedArticle {
@@ -107,6 +107,12 @@ describe('sourceHref', () => {
     expect(sourceHref('https://api.osf.io/v2/preprints/hnjbx_v1/')).toBe('https://osf.io/hnjbx');
     expect(sourceHref('https://api.osf.io/v2/preprints/b7h5c')).toBe('https://osf.io/b7h5c');
     expect(humanOsfPreprintUrl('https://api.osf.io/v2/preprints/g4j8k_v3/')).toBe('https://osf.io/g4j8k');
+  });
+
+  it('converts bare Zenodo record IDs to human-readable Zenodo record pages only for Zenodo sources', () => {
+    expect(sourceHref('17548056', 'Zenodo')).toBe('https://zenodo.org/records/17548056');
+    expect(humanZenodoUrl('5101141', 'Zenodo')).toBe('https://zenodo.org/records/5101141');
+    expect(sourceHref('17548056', 'Crossref')).toBeNull();
   });
 });
 
