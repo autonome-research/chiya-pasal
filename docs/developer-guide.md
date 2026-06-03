@@ -45,7 +45,8 @@ Digest implementation is split under `pipelines/src/phases/digest/`:
 - `load-articles.ts` — loads candidates from `ArticleStore`
 - `classify.ts` — assigns digest buckets
 - `draft.ts` — drafts section markdown
-- `assemble.ts` — builds the final digest body
+- `assemble.ts` — builds the Markdown digest body and attaches HTML email output
+- `render-html.ts` — deterministic, email-safe HTML renderer with embedded source links
 - `publish.ts` — log/commit/push/email side effects
 
 Rules:
@@ -54,6 +55,8 @@ Rules:
 - check `finishReason === 'length'`
 - keep side effects in `publish.ts`
 - run publishing under the vault mutation lock
+- do not ask LLMs to produce HTML; render email HTML deterministically in TypeScript
+- escape all article/model text before inserting into HTML, and only turn validated source URLs into links
 - preserve daily email idempotency: `src/shared/digest-delivery.ts` checks persisted `email-send:sent` events so retries/catch-up runs do not send duplicate mail for a local calendar day
 - email delivery failures should throw after logging a failed event; do not mark failed delivery as a completed digest
 
