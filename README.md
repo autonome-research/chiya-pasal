@@ -40,6 +40,8 @@ Two SQLite tables anchor the flow: `article` (status FSM: pending → processing
 ```
 chiya-library/
 ├── README.md                    # This file
+├── AGENTS.md                    # Project intent and guidance for future agents
+├── CONTRIBUTING.md              # Verification and contribution mechanics
 ├── matcha/                      # Collection orchestration (shell + Go RSS reader)
 │   ├── config.yaml              # Feed URLs, limits, keywords
 │   ├── interests.yaml           # Interest keywords
