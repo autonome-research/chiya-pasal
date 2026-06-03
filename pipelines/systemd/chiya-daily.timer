@@ -1,0 +1,12 @@
+[Unit]
+Description=Chiya daily full cycle — 09:00 local, catch up after boot
+
+[Timer]
+# Run at 09:00 local. Persistent=true makes systemd run the missed cycle later
+# in the day if the machine was asleep/off at 09:00.
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+Unit=chiya-daily.service
+
+[Install]
+WantedBy=timers.target

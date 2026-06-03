@@ -56,7 +56,9 @@ Rules:
 - validate any LLM JSON with `src/shared/llm-schema.ts`
 - check `finishReason === 'length'`
 - keep side effects in `publish.ts`
-- run publishing under the vault mutation lock
+- run vault/git publishing under the vault mutation lock
+- preserve digest email idempotency: `digest.ts` uses `digest-delivery.ts` to skip duplicate successful email sends for the same local date when `CHIYA_DIGEST_ONCE_DAILY=1` (enabled by the daily cycle, not by standalone AM/PM digest timers by default)
+- email delivery failures should throw so digest jobs are visibly failed
 
 ## Adding or changing a scout
 

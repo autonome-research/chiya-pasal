@@ -3,6 +3,7 @@
 import { requireCtx, type Phase } from 'thread-phase';
 
 import type { DigestCtx } from '../../shared/digest-types.js';
+import { hasSuccessfulDigestEmail } from '../../shared/digest-delivery.js';
 import type { ChiyaEnv } from '../../shared/env.js';
 import { gwsEmailSend } from '../../tools/email.js';
 import { GitOps } from '../../tools/git.js';
@@ -16,8 +17,14 @@ export const appendLog = (vault: VaultFs): Phase<DigestCtx> => ({
     const highlighted = classified.filter((c) => c.bucket !== 'skip').length;
 
     const entry = `## [${ctx.date}] digest | ${ctx.direction} digest curated — ${highlighted} highlights from ${articles.length} articles\n`;
-    await vault.append('log.md', '\n' + entry);
+    const marker = `## [${ctx.date}] digest | ${ctx.direction} digest curated`;
+    const existingLog = await vault.readOptional('log.md');
     ctx.logEntry = entry;
+    if (existingLog?.includes(marker)) {
+      yield { type: 'agent_activity', agent: 'append-log', action: 'noop', detail: `already logged: ${marker}` };
+      return;
+    }
+    await vault.append('log.md', '\n' + entry);
     yield { type: 'agent_activity', agent: 'append-log', action: 'appended', detail: entry.trim() };
   },
 });
@@ -61,9 +68,25 @@ export const squashAndPush = (git: GitOps): Phase<DigestCtx> => ({
   },
 });
 
-export const emailSend = (env: ChiyaEnv): Phase<DigestCtx> => ({
+export interface EmailSendOptions {
+  onceDaily?: boolean;
+  dbPath?: string;
+}
+
+export const emailSend = (env: ChiyaEnv, options: EmailSendOptions = {}): Phase<DigestCtx> => ({
   name: 'email-send',
   async *run(ctx) {
+    if (options.onceDaily && options.dbPath && hasSuccessfulDigestEmail(options.dbPath, ctx.date)) {
+      ctx.emailed = { ok: true, output: 'skipped: email already sent for local date' };
+      yield {
+        type: 'agent_activity',
+        agent: 'email-send',
+        action: 'skipped',
+        detail: `already sent for ${ctx.date}`,
+      };
+      return;
+    }
+
     const digest = requireCtx(ctx, 'digest', 'email-send');
     const result = await gwsEmailSend({
       to: env.emailTo,
@@ -71,14 +94,14 @@ export const emailSend = (env: ChiyaEnv): Phase<DigestCtx> => ({
       body: digest,
     });
     ctx.emailed = result;
-    if (!result.ok) {
-      ctx.stop = { reason: `email-failed: ${result.output.slice(0, 200)}` };
-    }
     yield {
       type: 'agent_activity',
       agent: 'email-send',
       action: result.ok ? 'sent' : 'failed',
       detail: result.output.slice(0, 200),
     };
+    if (!result.ok) {
+      throw new Error(`email-failed: ${result.output.slice(0, 500)}`);
+    }
   },
 });

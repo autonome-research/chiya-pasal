@@ -70,7 +70,7 @@ chiya-library/
     │   └── tools/               # vault / git / email / web / article-lookup
     ├── scripts/                 # One-shots (migrations, dumps)
     ├── systemd/                 # User timer/service units
-    └── __tests__/               # Vitest suite (358 tests)
+    └── __tests__/               # Vitest suite (363 tests)
 ```
 
 The wiki is a separate repo (`~/vault`) — not vendored here. Sources live at `wiki/sources/<stable-id>.md`, topics at `wiki/topics/<slug>.md` (flat, with `clusters:` frontmatter for soft domain metadata), entities at `wiki/entities/<slug>.md`. The append-only `log.md` and `index.md` sit at the vault root.
@@ -112,6 +112,7 @@ crontab -e
 cd pipelines && npm run doctor -- --no-network
 
 # 7. systemd timers (curation). See pipelines/README.md for the install steps.
+# Optional: use chiya-daily.timer for a once-daily collect → intake → librarian → digest cycle.
 ```
 
 ## Cadences
@@ -123,8 +124,9 @@ cd pipelines && npm run doctor -- --no-network
 | librarian | systemd timer | every 10 min (drain mode); switch to 30 min once backlog clears |
 | digest AM | systemd timer | 06:30 local |
 | digest PM | systemd timer | 18:30 local |
+| daily full cycle | optional systemd timer | 09:00 local with catch-up after boot/wake |
 
-The digest commits and pushes the vault on every successful run, so GitHub sees updates twice daily.
+The digest commits and pushes the vault on every successful run. When the daily full-cycle runner is used, digest email delivery is guarded with `CHIYA_DIGEST_ONCE_DAILY=1` so a local calendar day is not emailed twice.
 
 ## Sources
 

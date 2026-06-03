@@ -62,6 +62,7 @@ function clientFor(target: InferenceTarget): OpenAI {
 
 async function main(): Promise<void> {
   const direction = parseDirection();
+  const localDate = todayLocal();
   const env = loadChiyaEnv();
 
   console.log(
@@ -87,7 +88,10 @@ async function main(): Promise<void> {
       [appendLog(vault), commitDigest(git), squashAndPush(git)],
       'digest-vault-mutation',
     ),
-    emailSend(env),
+    emailSend(env, {
+      onceDaily: process.env.CHIYA_DIGEST_ONCE_DAILY === '1',
+      dbPath,
+    }),
   ];
 
   const store = new SqliteJobStore(dbPath);
@@ -97,7 +101,7 @@ async function main(): Promise<void> {
   const ctx: DigestCtx = {
     cache: new PipelineCache(),
     direction,
-    date: todayLocal(),
+    date: localDate,
     signal: runController.signal,
   };
 
