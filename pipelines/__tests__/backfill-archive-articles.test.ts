@@ -22,6 +22,7 @@ type: article
 #### AI
 - [First Paper](https://example.org/first) *(arXiv)* — useful abstract
 - [Second Paper](https://example.org/second) *(OpenAlex)* — another abstract
+- [Zenodo Dataset](17548056) *(Zenodo)* — dataset abstract
 `,
   );
   return { dir, db: join(dir, '.chiya-pipelines.db') };
@@ -36,14 +37,14 @@ describe('backfill-archive-articles script', () => {
         encoding: 'utf8',
       });
       expect(first.status, first.stderr).toBe(0);
-      expect(JSON.parse(first.stdout)).toMatchObject({ files: 1, parsed: 2, inserted: 2 });
+      expect(JSON.parse(first.stdout)).toMatchObject({ files: 1, parsed: 3, inserted: 3 });
 
       const second = spawnSync('npx', ['tsx', script, `--vault=${dir}`, `--db=${db}`, '--status=pending'], {
         cwd: process.cwd(),
         encoding: 'utf8',
       });
       expect(second.status, second.stderr).toBe(0);
-      expect(JSON.parse(second.stdout)).toMatchObject({ files: 1, parsed: 2, inserted: 0 });
+      expect(JSON.parse(second.stdout)).toMatchObject({ files: 1, parsed: 3, inserted: 0 });
 
       const sql = new Database(db);
       try {
@@ -52,9 +53,12 @@ describe('backfill-archive-articles script', () => {
           status: string;
           collected_at: string;
         }>;
-        expect(rows).toHaveLength(2);
-        expect(rows.map((r) => r.status)).toEqual(['pending', 'pending']);
+        expect(rows).toHaveLength(3);
+        expect(rows.map((r) => r.status)).toEqual(['pending', 'pending', 'pending']);
         expect(rows.every((r) => r.collected_at.startsWith('2026-05-31'))).toBe(true);
+        expect((sql.prepare('SELECT url FROM article WHERE title = ?').get('Zenodo Dataset') as { url: string }).url).toBe(
+          'https://zenodo.org/records/17548056',
+        );
       } finally {
         sql.close();
       }
@@ -71,7 +75,7 @@ describe('backfill-archive-articles script', () => {
         encoding: 'utf8',
       });
       expect(result.status, result.stderr).toBe(0);
-      expect(JSON.parse(result.stdout)).toMatchObject({ inserted: 2, markedDone: 2 });
+      expect(JSON.parse(result.stdout)).toMatchObject({ inserted: 3, markedDone: 3 });
 
       const sql = new Database(db);
       try {
