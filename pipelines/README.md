@@ -6,11 +6,12 @@ Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](http
 
 | Pipeline | State | Cadence |
 |---|---|---|
-| `intake` | live | every 4h at HH:03 |
-| `librarian` | live (v3 router → scouts → reviewer flow) | every 10 min (drain mode); switch to 30 min once `pending` clears |
-| `digest` | live | 06:30 / 18:30 local |
+| `daily full cycle` | live default | 09:00 local with `Persistent=true` catch-up after boot/wake |
+| `intake` | available | manual/split-cadence use |
+| `librarian` | available (v3 router → scouts → reviewer flow) | manual/split-cadence use |
+| `digest` | available | manual/split-cadence use; email guarded once per local day by default |
 
-342 tests, all green. `npm test`, `npm run build`.
+345 tests, all green. `npm test`, `npm run build`.
 
 ## Setup
 
@@ -22,7 +23,7 @@ npm run build
 
 ### Required env
 
-`VAULT_DIR` and `CHIYA_EMAIL_TO` are the only must-set vars. Everything else has defaults wired for the tiny-emerson Ollama tunnel + local vault. Put them in `pipelines/.env` (gitignored) — systemd loads via `EnvironmentFile=`.
+`VAULT_DIR` and `CHIYA_EMAIL_TO` are the only must-set vars. Everything else has defaults wired for the tiny-emerson Ollama tunnel + local vault. Put them in `pipelines/.env` (gitignored) — systemd loads via `EnvironmentFile=` and `run-cycle.sh` also sources it for manual runs.
 
 | Var | Default | Notes |
 |---|---|---|
@@ -37,6 +38,10 @@ npm run build
 | `THREAD_PHASE_DB` | `<VAULT_DIR>/.chiya-pipelines.db` | Shared SQLite for both `article` and `job` tables |
 | `CHIYA_FAST_MAX_TOKENS` | `4000` | Output-token cap for fast-tier digest classify/draft calls. Raised for reasoning models that otherwise spend the full cap on hidden reasoning and return `finishReason: length`. |
 | `API_SOURCE_TIMEOUT_MS` | `15000` | Per-source API ingest timeout. Timed-out sources are reported as warnings and the collector continues. |
+| `CHIYA_DIGEST_ONCE_DAILY` | `1` | If enabled, `digest.ts` skips email once a successful `email-send` event already exists for the local date. Set `0` for deliberate multiple digest emails/day. |
+| `CHIYA_CYCLE_LIBRARIAN_PASSES` | `5` | Max librarian batches the daily cycle will drain before sending the digest. |
+| `CHIYA_CYCLE_LIBRARIAN_BATCH` | `10` | Batch size for each daily-cycle librarian pass. |
+| `CHIYA_CYCLE_LIBRARIAN_MINUTES` | `8` | Soft deadline per librarian pass in the daily cycle. |
 
 The default `localhost:11435` is the SSH tunnel installed via `chiya-tunnel-tiny.service` (forwards to tiny-emerson:11434).
 
@@ -45,6 +50,7 @@ The default `localhost:11435` is the SSH tunnel installed via `chiya-tunnel-tiny
 ```bash
 set -a && source .env && set +a   # systemd loads this automatically
 
+./run-cycle.sh AM                 # collect → intake → librarian drain → digest/email
 npm run intake                    # tsx src/intake.ts
 npm run librarian                 # tsx src/librarian.ts
 npm run digest:am                 # tsx src/digest.ts AM
@@ -57,22 +63,14 @@ Each run logs every event to stdout. Persisted job + event log lives in `$THREAD
 
 ```bash
 mkdir -p ~/.config/systemd/user
-ln -sf ~/chiya-library/pipelines/systemd/chiya-tunnel-tiny.service ~/.config/systemd/user/
-ln -sf ~/chiya-library/pipelines/systemd/chiya-intake.service      ~/.config/systemd/user/
-ln -sf ~/chiya-library/pipelines/systemd/chiya-intake.timer        ~/.config/systemd/user/
-ln -sf ~/chiya-library/pipelines/systemd/chiya-librarian.service   ~/.config/systemd/user/
-ln -sf ~/chiya-library/pipelines/systemd/chiya-librarian.timer     ~/.config/systemd/user/
-ln -sf ~/chiya-library/pipelines/systemd/chiya-digest@.service     ~/.config/systemd/user/
-ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-am.timer     ~/.config/systemd/user/
-ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-pm.timer     ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-daily.service       ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-daily.timer         ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-tunnel-tiny.service ~/.config/systemd/user/  # if using the tunnel defaults
 
 systemctl --user daemon-reload
 systemctl --user enable --now \
   chiya-tunnel-tiny.service \
-  chiya-intake.timer \
-  chiya-librarian.timer \
-  chiya-digest-am.timer \
-  chiya-digest-pm.timer
+  chiya-daily.timer
 
 systemctl --user list-timers chiya-*
 ```
@@ -81,13 +79,20 @@ Every pipeline service has `ExecStartPre=npm rebuild better-sqlite3` so a silent
 
 Manual triggers:
 ```bash
+systemctl --user start chiya-daily.service
+journalctl --user -u chiya-daily.service -f
+
+# Advanced split-cadence/manual debugging remains available:
 systemctl --user start chiya-intake.service
 systemctl --user start chiya-librarian.service
 systemctl --user start chiya-digest@AM.service
-journalctl --user -u chiya-librarian.service -f
 ```
 
 ## Pipeline shapes
+
+### run-cycle.sh
+
+The default deployment uses one daily service instead of separate collection / curation / digest timers. `run-cycle.sh` sources `pipelines/.env`, takes a non-blocking cycle lock, runs collection and intake, drains up to `CHIYA_CYCLE_LIBRARIAN_PASSES` librarian batches, then runs the AM digest. The digest's once-daily guard checks persisted thread-phase events, so a missed 09:00 timer that catches up later — or a manual retry — will not send duplicate email after a successful delivery.
 
 ### collection/api-ingest.ts
 

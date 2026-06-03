@@ -54,6 +54,8 @@ Rules:
 - check `finishReason === 'length'`
 - keep side effects in `publish.ts`
 - run publishing under the vault mutation lock
+- preserve daily email idempotency: `src/shared/digest-delivery.ts` checks persisted `email-send:sent` events so retries/catch-up runs do not send duplicate mail for a local calendar day
+- email delivery failures should throw after logging a failed event; do not mark failed delivery as a completed digest
 
 ## Adding or changing a scout
 

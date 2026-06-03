@@ -1,0 +1,19 @@
+[Unit]
+Description=Chiya daily full cycle — collect, graph, digest email
+Documentation=https://github.com/autonome-research/chiya-pasal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/chiya-library/pipelines
+# Rebuild the better-sqlite3 native binding against the running Node ABI.
+ExecStartPre=/usr/bin/env npm rebuild better-sqlite3 --silent
+ExecStart=%h/chiya-library/pipelines/run-cycle.sh AM
+Environment=VAULT_DIR=%h/vault
+Environment=CHIYA_DIGEST_ONCE_DAILY=1
+EnvironmentFile=-%h/chiya-library/pipelines/.env
+StandardOutput=journal
+StandardError=journal
+# Full cycle includes network collection and several LLM-bound librarian passes.
+TimeoutStartSec=3600

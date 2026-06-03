@@ -16,6 +16,7 @@ import {
 import OpenAI from 'openai';
 
 import { ArticleStore } from './shared/article-store.js';
+import { hasSuccessfulDigestEmail } from './shared/digest-delivery.js';
 import { loadChiyaEnv, type InferenceTarget } from './shared/env.js';
 import { installShutdownHandlers } from './shared/shutdown.js';
 import { sweepStaleJobLock } from './shared/sweep-stale-job.js';
@@ -62,6 +63,7 @@ function clientFor(target: InferenceTarget): OpenAI {
 
 async function main(): Promise<void> {
   const direction = parseDirection();
+  const localDate = todayLocal();
   const env = loadChiyaEnv();
 
   console.log(
@@ -75,6 +77,13 @@ async function main(): Promise<void> {
   const fastClient = clientFor(env.fast);
   const dbPath = process.env.THREAD_PHASE_DB ?? `${env.vaultDir}/.chiya-pipelines.db`;
   const articleStore = new ArticleStore(dbPath);
+
+  const onceDaily = process.env.CHIYA_DIGEST_ONCE_DAILY !== '0';
+  if (onceDaily && hasSuccessfulDigestEmail(dbPath, localDate)) {
+    console.log('[digest] email already sent for today — skipping digest/email');
+    articleStore.close();
+    return;
+  }
 
   const phases = [
     loadContext(vault),
@@ -97,7 +106,7 @@ async function main(): Promise<void> {
   const ctx: DigestCtx = {
     cache: new PipelineCache(),
     direction,
-    date: todayLocal(),
+    date: localDate,
     signal: runController.signal,
   };
 

@@ -21,15 +21,12 @@ Chiya (茶) — "tea" — a curated serving of research intelligence, delivered 
 ┌──────────────────────────────────────────────────────────────┐
 │  Pipelines (TypeScript on thread-phase, systemd user timers) │
 │                                                              │
-│  intake.timer       (HH:03, every 4h)                        │
-│    └── scan raw/inbox/ → ArticleStore (pending) → archive    │
+│  chiya-daily.timer (09:00 local, Persistent catch-up)         │
+│    └── run-cycle.sh: collect → intake → librarian drain      │
+│        → graph/log git push → one guarded daily digest email  │
 │                                                              │
-│  librarian.timer    (every 10 min, drain mode)               │
-│    └── per article: router → 4 scouts → reviewer → plan      │
-│         then serial apply emits source/topic/cite pages       │
-│                                                              │
-│  digest@.service    (06:30 + 18:30, AM/PM)                   │
-│    └── load → prioritize → draft → commit → push → email     │
+│  Individual intake/librarian/digest units remain available   │
+│  for manual debugging and advanced split-cadence operation.  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -70,7 +67,7 @@ chiya-library/
     │   └── tools/               # vault / git / email / web / article-lookup
     ├── scripts/                 # One-shots (migrations, dumps)
     ├── systemd/                 # User timer/service units
-    └── __tests__/               # Vitest suite (342 tests)
+    └── __tests__/               # Vitest suite (345 tests)
 ```
 
 The wiki is a separate repo (`~/vault`) — not vendored here. Sources live at `wiki/sources/<stable-id>.md`, topics at `wiki/topics/<slug>.md` (flat, with `clusters:` frontmatter for soft domain metadata), entities at `wiki/entities/<slug>.md`. The append-only `log.md` and `index.md` sit at the vault root.
@@ -104,24 +101,18 @@ cp interests.yaml.example interests.yaml
 git clone <your-vault-remote> ~/vault
 # Edit ~/vault/TASTE.md, ~/vault/user/profile.md to taste
 
-# 5. matcha cron (collection every 4h)
-crontab -e
-# 0 */4 * * * /home/$USER/chiya-library/matcha/scripts/collect.sh >> /home/$USER/chiya-library/matcha/logs/cron.log 2>&1
-
-# 6. systemd timers (curation). See pipelines/README.md for the install steps.
+# 5. systemd timer (daily full cycle). See pipelines/README.md for install steps.
+# The daily cycle calls matcha/scripts/collect.sh itself, so a separate cron
+# collector is optional and not needed for the default once-daily workflow.
 ```
 
 ## Cadences
 
 | Layer | Trigger | Frequency |
 |---|---|---|
-| matcha collect | Linux cron | every 4h at HH:00 |
-| intake | systemd timer | HH:03 (3 min behind matcha) |
-| librarian | systemd timer | every 10 min (drain mode); switch to 30 min once backlog clears |
-| digest AM | systemd timer | 06:30 local |
-| digest PM | systemd timer | 18:30 local |
+| daily full cycle | systemd timer | 09:00 local; `Persistent=true` catches up after boot/wake |
 
-The digest commits and pushes the vault on every successful run, so GitHub sees updates twice daily.
+The daily cycle collects, dedupes, intakes, updates the vault graph, commits/pushes, and sends one guarded digest email. If the device is off at 09:00, systemd runs the missed cycle later the same day when the user session is active. The digest email is guarded so retries do not send duplicate mail for the same local calendar day.
 
 ## Sources
 

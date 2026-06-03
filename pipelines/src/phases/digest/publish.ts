@@ -71,14 +71,14 @@ export const emailSend = (env: ChiyaEnv): Phase<DigestCtx> => ({
       body: digest,
     });
     ctx.emailed = result;
-    if (!result.ok) {
-      ctx.stop = { reason: `email-failed: ${result.output.slice(0, 200)}` };
-    }
     yield {
       type: 'agent_activity',
       agent: 'email-send',
       action: result.ok ? 'sent' : 'failed',
       detail: result.output.slice(0, 200),
     };
+    if (!result.ok) {
+      throw new Error(`email-failed: ${result.output.slice(0, 500)}`);
+    }
   },
 });
