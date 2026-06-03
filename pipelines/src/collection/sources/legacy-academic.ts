@@ -263,7 +263,7 @@ export function parseOsf(data: unknown, fallbackField = 'Preprint'): ArticleCand
     const attrs = (rec.attributes ?? {}) as Record<string, unknown>;
     const title = text(attrs.title) ?? text(attrs.name);
     const links = (rec.links ?? {}) as Record<string, unknown>;
-    const url = text(links.html) ?? text(links.self) ?? text(attrs.url);
+    const url = osfHumanUrl(links, attrs);
     if (!title || !url) return [];
     return [normalizeCandidate({
       title,
@@ -274,4 +274,20 @@ export function parseOsf(data: unknown, fallbackField = 'Preprint'): ArticleCand
       publishedAt: parseDate(attrs.date_published) ?? parseDate(attrs.date_created),
     })];
   });
+}
+
+function osfHumanUrl(links: Record<string, unknown>, attrs: Record<string, unknown>): string | undefined {
+  const direct = text(links.iri) ?? text(links.html) ?? text(attrs.url);
+  if (direct && !direct.includes('api.osf.io')) return direct;
+
+  const apiUrl = text(links.self) ?? direct;
+  if (!apiUrl) return direct;
+  try {
+    const u = new URL(apiUrl);
+    const match = /^\/v2\/preprints\/([^/?#]+)\/?$/i.exec(u.pathname);
+    const slug = match?.[1]?.replace(/_v\d+$/i, '');
+    return slug ? `https://osf.io/${slug}` : direct;
+  } catch {
+    return direct;
+  }
 }

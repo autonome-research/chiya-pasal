@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { escapeHtml, renderDigestEmailHtml, sourceHref } from '../src/phases/digest/render-html.js';
+import { escapeHtml, humanOsfPreprintUrl, renderDigestEmailHtml, sourceHref } from '../src/phases/digest/render-html.js';
 import type { ClassifiedArticle } from '../src/shared/digest-types.js';
 
 function item(overrides: Partial<ClassifiedArticle> = {}): ClassifiedArticle {
@@ -101,6 +101,12 @@ describe('sourceHref', () => {
     expect(sourceHref('10.1234/example')).toBe('https://doi.org/10.1234/example');
     expect(sourceHref('doi:10.1234/example')).toBe('https://doi.org/10.1234/example');
     expect(sourceHref('javascript:alert(1)')).toBeNull();
+  });
+
+  it('converts OSF API preprint URLs to human-readable OSF pages', () => {
+    expect(sourceHref('https://api.osf.io/v2/preprints/hnjbx_v1/')).toBe('https://osf.io/hnjbx');
+    expect(sourceHref('https://api.osf.io/v2/preprints/b7h5c')).toBe('https://osf.io/b7h5c');
+    expect(humanOsfPreprintUrl('https://api.osf.io/v2/preprints/g4j8k_v3/')).toBe('https://osf.io/g4j8k');
   });
 });
 

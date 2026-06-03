@@ -107,10 +107,27 @@ ${ingestLines.map((l) => `  <li>${escapeHtml(l)}</li>`).join('\n')}
 export function sourceHref(rawUrl: string | null | undefined): string | null {
   const url = rawUrl?.trim();
   if (!url) return null;
+
+  const osf = humanOsfPreprintUrl(url);
+  if (osf) return osf;
+
   if (/^https?:\/\//i.test(url)) return url;
   if (/^doi:/i.test(url)) return `https://doi.org/${url.replace(/^doi:/i, '').trim()}`;
   if (/^10\.\S+\/\S+/i.test(url)) return `https://doi.org/${url}`;
   return null;
+}
+
+export function humanOsfPreprintUrl(rawUrl: string): string | null {
+  try {
+    const u = new URL(rawUrl);
+    if (u.hostname !== 'api.osf.io') return null;
+    const match = /^\/v2\/preprints\/([^/?#]+)\/?$/i.exec(u.pathname);
+    if (!match) return null;
+    const slug = match[1]?.replace(/_v\d+$/i, '');
+    return slug ? `https://osf.io/${slug}` : null;
+  } catch {
+    return null;
+  }
 }
 
 export function escapeHtml(value: string): string {

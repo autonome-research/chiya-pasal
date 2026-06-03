@@ -4,6 +4,7 @@
  * Goal: two URLs that point to the same paper hash to the same value.
  * Specifically:
  *   - arxiv version suffixes (v1/v2/...) collapse to bare id
+ *   - osf API preprint URLs become human-readable https://osf.io/<slug>
  *   - osf preprint version suffixes (_v1/_v2/...) collapse to bare slug
  *   - bare DOIs (no scheme) → https://doi.org/<doi>
  *   - trailing slashes stripped
@@ -18,6 +19,7 @@
 // Modern: 2602.20643[v\d+]   Old-style: cs.AI/0102003[v\d+] (category may have dot)
 const ARXIV_RE = /^(?:https?:\/\/)?(?:www\.|export\.|api\.)?arxiv\.org\/(?:abs|pdf)\/([0-9]{4}\.[0-9]+|[a-z\-]+(?:\.[A-Z]+)?\/[0-9]+)(?:v\d+)?(?:\.pdf)?\/?$/i;
 const OSF_VERSION_RE = /(_v\d+)\/?$/;
+const OSF_API_PREPRINT_RE = /^\/v2\/preprints\/([^/?#]+)\/?$/i;
 // Bare DOI: starts with `10.<digits>/...` and no scheme.
 const BARE_DOI_RE = /^10\.\d{4,9}\/.+/;
 
@@ -48,6 +50,12 @@ export function normalizeUrl(raw: string | null | undefined): string | null {
   // Lowercase scheme + host
   parsed.protocol = parsed.protocol.toLowerCase();
   parsed.hostname = parsed.hostname.toLowerCase();
+
+  if (parsed.hostname === 'api.osf.io') {
+    const match = OSF_API_PREPRINT_RE.exec(parsed.pathname);
+    const slug = match?.[1]?.replace(/_v\d+$/i, '');
+    if (slug) return `https://osf.io/${slug}`;
+  }
 
   // Strip osf version suffix from pathname
   parsed.pathname = parsed.pathname.replace(OSF_VERSION_RE, '/');
