@@ -211,7 +211,7 @@ Potential fixes:
 
 - named config profiles: local, remote, dry-run, test
 - one `chiya doctor` command to validate vault, DB, inference, git, email, and collection sources (started as `npm run doctor`: env/email, vault, DB, git, inference)
-- generated systemd/cron templates from config
+- generated systemd/cron templates from config (started: optional `chiya-daily.timer` for a daily collect → intake → librarian → digest cycle)
 
 ### 11. Observability is good but could become more actionable
 
@@ -221,6 +221,7 @@ Potential additions:
 
 - source health summary per collection run
 - article lifecycle dashboard or CLI (started: `npm run status` shows article counts + recent jobs)
+- once-daily digest/email idempotency for catch-up timers (implemented via persisted `email-send` events)
 - per-source yield/drop stats
 - per-agent latency/token/tool-call stats
 - failure summaries grouped by phase/reason
