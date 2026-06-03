@@ -11,7 +11,7 @@ Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](http
 | `digest` | live | 06:30 / 18:30 local |
 | `daily cycle` | optional | 09:00 local catch-up timer: collect → intake → librarian passes → digest/email |
 
-363 tests, all green. `npm test`, `npm run build`.
+369 tests, all green. `npm test`, `npm run build`.
 
 ## Setup
 
@@ -151,19 +151,21 @@ Per-article planning wall: ~50-85s (7 LLM calls). Batch=10 + planning concurrenc
 
 ### digest.ts
 
-Implementation is split under `src/phases/digest/` (`context`, `load-articles`, `classify`, `draft`, `assemble`, `publish`). `src/phases/digest-phases.ts` remains a compatibility re-export surface.
+Implementation is split under `src/phases/digest/` (`context`, `load-articles`, `classify`, `draft`, `assemble`, `render-html`, `publish`). `src/phases/digest-phases.ts` remains a compatibility re-export surface.
 
 ```
 loadContext         (pure)   read CLAUDE.md, TASTE.md, index, log tail, focuses, research/STATUS
 loadArticles        (pure)   query ArticleStore by collected-on-{date}
 prioritize          (LLM)    classify each article: focus / notable / followup / skip
 draftSections       (LLM)    one writer per article-driven section
-assemble            (pure)   format final markdown
+assemble            (pure)   format final markdown plus deterministic HTML email
 appendLog           (pure)   record digest entry in vault/log.md
 commitDigest        (pure)   local git commit
 squashAndPush       (pure)   fetch → squash unpushed local commits → push to origin
-emailSend           (pure)   gws gmail +send; throws on send failure
+emailSend           (pure)   gws gmail +send (--html when HTML body is available); throws on send failure
 ```
+
+Email format: the digest keeps a Markdown/plain-text body for logs and fallback, but sends a deterministic HTML fragment when available. Article titles are rendered as embedded links to the original collected source URL; all article/model text is HTML-escaped in TypeScript, and the LLM is never asked to generate HTML.
 
 Push strategy: many small local commits accumulate (librarian and digest both); the digest's `squashAndPush` rebase-squashes everything since the last push into one commit per push. Result on remote: ~2 commits/day max, each summarizing the work since the last push.
 

@@ -51,7 +51,10 @@ export interface DigestCtx extends BasePipelineContext {
   articles?: Article[];
   classified?: ClassifiedArticle[];
   sections?: DigestSection[];
+  /** Plain-text/Markdown fallback digest, also useful for logs/debugging. */
   digest?: string;
+  /** Email-safe deterministic HTML digest with embedded source links. */
+  digestHtml?: string;
   /** Set after appendLog so commitDigest knows there's something to commit. */
   logEntry?: string;
   pushed?: { squashedCount: number; sha?: string; pushed: boolean };

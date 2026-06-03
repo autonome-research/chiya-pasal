@@ -88,10 +88,12 @@ export const emailSend = (env: ChiyaEnv, options: EmailSendOptions = {}): Phase<
     }
 
     const digest = requireCtx(ctx, 'digest', 'email-send');
+    const html = ctx.digestHtml;
     const result = await gwsEmailSend({
       to: env.emailTo,
       subject: `🍵 Chiya Daily Digest — ${ctx.date} (${ctx.direction})`,
-      body: digest,
+      body: html ?? digest,
+      html: Boolean(html),
     });
     ctx.emailed = result;
     yield {

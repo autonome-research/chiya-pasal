@@ -3,6 +3,7 @@
 import { requireCtx, type Phase } from 'thread-phase';
 
 import type { DigestCtx } from '../../shared/digest-types.js';
+import { renderDigestEmailHtml } from './render-html.js';
 
 export const assemble: Phase<DigestCtx> = {
   name: 'assemble',
@@ -17,6 +18,7 @@ export const assemble: Phase<DigestCtx> = {
       `🍵 Chiya Daily Digest — ${ctx.date} (${ctx.direction})\n\n` +
       body +
       `\n\n---\nTotal articles collected: ${articles.length} | Curated highlights: ${highlighted}\n`;
+    ctx.digestHtml = renderDigestEmailHtml(ctx);
 
     yield {
       type: 'data',
