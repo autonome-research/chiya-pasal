@@ -39,6 +39,7 @@ Rules:
 - use shared source fetch helpers for timeout/retry behavior unless the source requires custom protocol handling
 - test parsing with local fixtures, not live network calls
 - keep the live Markdown-first collector behavior unchanged until a deliberate migration decision
+- preserve cross-day dedup safety: the raw collector checks archived `*-articles.md` files, while ArticleStore remains the long-term dedup source of truth
 
 ## Adding or changing a digest section
 
@@ -48,7 +49,8 @@ Digest implementation is split under `pipelines/src/phases/digest/`:
 - `load-articles.ts` — loads candidates from `ArticleStore`
 - `classify.ts` — assigns digest buckets
 - `draft.ts` — drafts section markdown
-- `assemble.ts` — builds the final digest body
+- `assemble.ts` — builds the Markdown digest body and attaches HTML email output
+- `render-html.ts` — deterministic, email-safe HTML renderer with embedded source links
 - `publish.ts` — log/commit/push/email side effects
 
 Rules:
@@ -57,6 +59,8 @@ Rules:
 - check `finishReason === 'length'`
 - keep side effects in `publish.ts`
 - run vault/git publishing under the vault mutation lock
+- do not ask LLMs to produce HTML; render email HTML deterministically in TypeScript
+- escape all article/model text before inserting into HTML, and only turn validated source URLs into links
 - preserve digest email idempotency: `digest.ts` uses `digest-delivery.ts` to skip duplicate successful email sends for the same local date when `CHIYA_DIGEST_ONCE_DAILY=1` (enabled by the daily cycle, not by standalone AM/PM digest timers by default)
 - email delivery failures should throw so digest jobs are visibly failed
 
@@ -100,4 +104,13 @@ For native binding issues after Node upgrades:
 ```bash
 npm rebuild better-sqlite3 --silent
 ```
+
+If ArticleStore is lost/reset but raw inbox archives remain, recover with:
+
+```bash
+npm run backfill-archive-articles -- --status=done     # dedup memory only
+npm run backfill-archive-articles -- --status=pending  # re-queue archived resources
+```
+
+Backfill uses archive filenames for `collected_at`, so restored historical resources do not appear as newly collected today.
 

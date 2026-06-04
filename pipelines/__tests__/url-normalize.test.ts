@@ -27,13 +27,10 @@ describe('normalizeUrl', () => {
     expect(normalizeUrl('https://arxiv.org/abs/cs.AI/0102003v2')).toBe('https://arxiv.org/abs/cs.AI/0102003');
   });
 
-  it('OSF strips _v\\d+ from pathname', () => {
-    expect(normalizeUrl('https://api.osf.io/v2/preprints/3e28f_v1/')).toBe(
-      'https://api.osf.io/v2/preprints/3e28f',
-    );
-    expect(normalizeUrl('https://api.osf.io/v2/preprints/dq6xt_v3/')).toBe(
-      'https://api.osf.io/v2/preprints/dq6xt',
-    );
+  it('OSF API preprint URLs become human-readable osf.io links', () => {
+    expect(normalizeUrl('https://api.osf.io/v2/preprints/3e28f_v1/')).toBe('https://osf.io/3e28f');
+    expect(normalizeUrl('https://api.osf.io/v2/preprints/dq6xt_v3/')).toBe('https://osf.io/dq6xt');
+    expect(normalizeUrl('https://api.osf.io/v2/preprints/hnjbx/')).toBe('https://osf.io/hnjbx');
   });
 
   it('strips trailing slash on pathname (not on root)', () => {

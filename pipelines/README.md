@@ -11,7 +11,7 @@ Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](http
 | `digest` | live | 06:30 / 18:30 local |
 | `daily cycle` | optional | 09:00 local catch-up timer: collect → intake → librarian passes → digest/email |
 
-363 tests, all green. `npm test`, `npm run build`.
+373 tests, all green. `npm test`, `npm run build`.
 
 ## Setup
 
@@ -60,6 +60,8 @@ npm run librarian -- --plan-only  # stops after semantic article plans; no apply
 npm run digest:am                 # tsx src/digest.ts AM
 npm run digest:pm                 # tsx src/digest.ts PM
 ./run-cycle.sh AM                 # collect → intake → librarian drain passes → guarded digest/email
+npm run backfill-archive-articles -- --status=done     # recover dedup memory after DB loss
+npm run backfill-archive-articles -- --status=pending  # re-queue archived resources for graph curation
 ```
 
 Each pipeline run logs every event to stdout. Persisted job + event log lives in `$THREAD_PHASE_DB`. Inspect with sqlite directly or via thread-phase's `JobStore.getJob` / `getEvents`. `npm run doctor` exits nonzero only for failed checks; warnings cover optional/non-blocking issues such as skipped network checks or a dirty vault worktree.
@@ -122,7 +124,7 @@ parseAndStore      (pure)   upsert into ArticleStore (URL + title hash dedup)
 archiveInboxFiles  (pure)   move processed files → vault/raw/inbox/archive/
 ```
 
-No LLM. Idempotent — re-running on the same files inserts nothing new.
+No LLM. Idempotent — re-running on the same files inserts nothing new. If the ArticleStore DB is ever lost/reset while raw inbox archives remain, recover dedup memory with `npm run backfill-archive-articles -- --status=done`, or re-queue archived resources for graph curation with `-- --status=pending`.
 
 ### librarian.ts
 
@@ -151,19 +153,21 @@ Per-article planning wall: ~50-85s (7 LLM calls). Batch=10 + planning concurrenc
 
 ### digest.ts
 
-Implementation is split under `src/phases/digest/` (`context`, `load-articles`, `classify`, `draft`, `assemble`, `publish`). `src/phases/digest-phases.ts` remains a compatibility re-export surface.
+Implementation is split under `src/phases/digest/` (`context`, `load-articles`, `classify`, `draft`, `assemble`, `render-html`, `publish`). `src/phases/digest-phases.ts` remains a compatibility re-export surface.
 
 ```
 loadContext         (pure)   read CLAUDE.md, TASTE.md, index, log tail, focuses, research/STATUS
 loadArticles        (pure)   query ArticleStore by collected-on-{date}
 prioritize          (LLM)    classify each article: focus / notable / followup / skip
 draftSections       (LLM)    one writer per article-driven section
-assemble            (pure)   format final markdown
+assemble            (pure)   format final markdown plus deterministic HTML email
 appendLog           (pure)   record digest entry in vault/log.md
 commitDigest        (pure)   local git commit
 squashAndPush       (pure)   fetch → squash unpushed local commits → push to origin
-emailSend           (pure)   gws gmail +send; throws on send failure
+emailSend           (pure)   gws gmail +send (--html when HTML body is available); throws on send failure
 ```
+
+Email format: the digest keeps a Markdown/plain-text body for logs and fallback, but sends a deterministic HTML fragment when available. Article titles are rendered as embedded links to the original collected source URL; all article/model text is HTML-escaped in TypeScript, and the LLM is never asked to generate HTML. OSF API preprint URLs are converted to human-readable `https://osf.io/<slug>` links, and Zenodo bare record IDs are converted to `https://zenodo.org/records/<id>` before rendering/backfill storage.
 
 Push strategy: many small local commits accumulate (librarian and digest both); the digest's `squashAndPush` rebase-squashes everything since the last push into one commit per push. Result on remote: ~2 commits/day max, each summarizing the work since the last push.
 
@@ -180,3 +184,5 @@ Two mechanisms keep a crashed run from blocking everything that follows:
 Both are tested in `__tests__/sweep-stale-job.test.ts` and `__tests__/article-store.test.ts`.
 
 3. **`VaultMutationLock`** — wraps librarian apply/metadata/commit and digest append/commit/push using an atomic lock directory under the vault root. This prevents cross-service `log.md` and git races while still allowing the expensive agent planning/classification work to run outside the lock.
+
+4. **`backfill-archive-articles`** — restores ArticleStore rows from `raw/inbox/archive/*-articles.md` after DB loss/reset. Use `--status=done` for dedup-memory recovery without graph work, or `--status=pending` when archived resources should be curated into the graph. The script preserves the original archive date from the filename so old resources do not masquerade as today's collection.

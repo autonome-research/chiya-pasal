@@ -152,20 +152,25 @@ def deduplicate(articles):
 
 
 def existing_article_paths(path):
-    """Return active and archived daily article files for today's dedup."""
+    """Return active and archived article files for cross-day dedup.
+
+    ArticleStore is the long-term dedup source of truth after intake, but the
+    collector should still avoid appending old articles when the DB has been
+    reset or intake has not run yet. Check the active daily file plus every
+    archived raw inbox article file, not only archives with today's date prefix.
+    """
     paths = []
     if os.path.exists(path):
         paths.append(path)
     if os.path.isdir(RAW_ARCHIVE_DIR):
-        archive_prefix = os.path.basename(path).removesuffix(".md")
         for name in sorted(os.listdir(RAW_ARCHIVE_DIR)):
-            if name.startswith(archive_prefix) and name.endswith(".md"):
+            if name.endswith("-articles.md"):
                 paths.append(os.path.join(RAW_ARCHIVE_DIR, name))
     return paths
 
 
 def get_existing_articles(paths):
-    """Read existing title and URL keys from active/archived daily raw article files."""
+    """Read existing title and URL keys from active/archived raw article files."""
     titles = []
     urls = set()
     for path in paths:

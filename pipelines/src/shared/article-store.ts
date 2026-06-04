@@ -103,6 +103,15 @@ function normalizeTitle(t: string): string {
   return t.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+function normalizeSourceUrl(url: string | null, source: string | null): string | null {
+  const raw = url?.trim();
+  if (!raw) return null;
+  if (/^zenodo$/i.test(source ?? '') && /^\d+$/.test(raw)) {
+    return `https://zenodo.org/records/${raw}`;
+  }
+  return raw;
+}
+
 export class ArticleStore {
   private db: DB;
 
@@ -123,7 +132,7 @@ export class ArticleStore {
    * publish the same paper, but for cheap firstpass dedup it's the right call.
    */
   upsertPending(input: ArticleInput): { result: UpsertResult; id: number | null } {
-    const normalizedUrl = normalizeUrl(input.url);
+    const normalizedUrl = normalizeUrl(normalizeSourceUrl(input.url, input.source));
     const urlHash = normalizedUrl ? sha256(normalizedUrl) : null;
     const titleHash = sha256(normalizeTitle(input.title));
 

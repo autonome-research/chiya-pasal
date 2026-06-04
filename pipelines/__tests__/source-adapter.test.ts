@@ -15,6 +15,7 @@ import {
   osfSource,
   parseEuropePmc,
   parseInspireHep,
+  parseOsf,
   parseZenodo,
   zenodoSource,
 } from '../src/collection/sources/legacy-academic.js';
@@ -64,6 +65,9 @@ describe('source adapter scaffold', () => {
     });
     expect(parseInspireHep({ hits: { hits: [{ id: 2, metadata: { titles: [{ title: 'I' }], citation_count: 3 } }] } })[0]).toMatchObject({
       title: 'I', source: 'INSPIRE-HEP', url: 'https://inspirehep.net/literature/2',
+    });
+    expect(parseOsf({ data: [{ attributes: { title: 'O' }, links: { self: 'https://api.osf.io/v2/preprints/hnjbx_v1/' } }] })[0]).toMatchObject({
+      title: 'O', source: 'OSF', url: 'https://osf.io/hnjbx',
     });
   });
 
