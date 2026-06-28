@@ -31,15 +31,15 @@ npm run build
 | `VAULT_BRANCH` | `main` | |
 | `CHIYA_EMAIL_TO` | *(required)* | Digest delivery target |
 | `FAST_INFERENCE_BASE_URL` | `http://localhost:11435/v1` | Fast-tier OpenAI-compatible endpoint |
-| `FAST_INFERENCE_MODEL` | `gemma4:e4b` | Used by digest drafting + librarian summary |
-| `TOOLS_INFERENCE_BASE_URL` | `http://localhost:11435/v1` | Tool-capable endpoint |
-| `TOOLS_INFERENCE_MODEL` | `gemma4:26b` | Used by librarian router + scouts + reviewer. `26b` because `e4b` confabulated tool calls without actually invoking them. |
+| `FAST_INFERENCE_MODEL` | `qwen36` | Digest classify/draft + librarian summary. No tools. |
+| `TOOLS_INFERENCE_BASE_URL` | `http://localhost:11435/v1` | Tool-capable endpoint (same vllm on tiny-emerson:9000) |
+| `TOOLS_INFERENCE_MODEL` | `qwen36` | Librarian router + scouts + reviewer. Verified to invoke `vault_read`/`vault_list`/etc. via OpenAI tool-call protocol. |
 | `THREAD_PHASE_DB` | `<VAULT_DIR>/.chiya-pipelines.db` | Shared SQLite for both `article` and `job` tables |
 | `CHIYA_FAST_MAX_TOKENS` | `4000` | Output-token cap for fast-tier digest classify/draft calls. Raised for reasoning models that otherwise spend the full cap on hidden reasoning and return `finishReason: length`. |
 | `CHIYA_SOURCE_TIMEOUT_MS` | `15000` | Per-request timeout for TypeScript API source adapters |
 | `CHIYA_SOURCE_RETRIES` | `1` | Retry count for retryable source HTTP failures (`408`, `429`, `5xx`) |
 
-The default `localhost:11435` is the SSH tunnel installed via `chiya-tunnel-tiny.service` (forwards to tiny-emerson:11434).
+The default `localhost:11435` is the SSH tunnel installed via `chiya-tunnel-tiny.service` (forwards to tiny-emerson:9000 — the raw vllm. NOT :8000, which is a PI/Hermes wrapper whose chat template hardcodes its own tool surface and breaks scout tool calls).
 
 ## Running by hand
 

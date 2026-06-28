@@ -1,21 +1,17 @@
 /**
  * Resolved environment for the chiya pipelines.
  *
- * Two inference targets — both currently route to tiny-emerson Ollama via
- * the SSH tunnel (localhost:11435 → tiny-emerson:11434). Same model
- * (gemma4:e4b) reused for both triage and upsert: it stays warm in VRAM,
- * no model-swap latency between the two phase types, supports tool calls
- * natively for upsert. tiny-emerson is configured to keep the model
- * resident (no eviction).
+ * Two inference targets, both default to tiny-emerson's vllm (qwen36) via
+ * the SSH tunnel (localhost:11435 → tiny-emerson:9000). One model, one
+ * endpoint — vllm pins the model in VRAM and serves it concurrently, so
+ * no benefit to splitting the targets right now. The split exists in case
+ * we want to point the fast tier at a smaller endpoint later.
  *
- * - `fast`  — used for triage / classifier / drafter. JSON-only output,
- *             needs reasoning-trace headroom (~150-300 tokens).
- * - `tools` — used for the librarian's wikiUpsert phase. Same endpoint
- *             and model; just keeps the conceptual split in case we want
- *             to route them differently again.
- *
- * Local vLLM (qwen3.6-27b on this box) is no longer used by chiya-pipelines
- * directly — it remains for Hermes-driven jobs (vault-daily-lint).
+ * - `fast`  — digest classify/draft and librarian summary call. JSON-only
+ *             output, no tools.
+ * - `tools` — librarian router + scouts + reviewer. Must support OpenAI
+ *             tool calling (qwen36 vllm on :9000 does; the PI wrapper on
+ *             :8000 does not — see chiya-tunnel-tiny.service).
  *
  * VAULT_DIR is the only required env; the tiny-emerson tunnel must be up
  * (see systemd/chiya-tunnel-tiny.service).
@@ -61,15 +57,15 @@ export function loadChiyaEnv(): ChiyaEnv {
     fast: {
       baseUrl: process.env.FAST_INFERENCE_BASE_URL ?? 'http://localhost:11435/v1',
       apiKey: process.env.FAST_INFERENCE_API_KEY ?? 'not-needed',
-      model: process.env.FAST_INFERENCE_MODEL ?? 'gemma4:e4b',
+      model: process.env.FAST_INFERENCE_MODEL ?? 'qwen36',
     },
     tools: {
       baseUrl: process.env.TOOLS_INFERENCE_BASE_URL ?? 'http://localhost:11435/v1',
       apiKey: process.env.TOOLS_INFERENCE_API_KEY ?? 'not-needed',
-      // gemma4:26b is bigger and slower than e4b but much more reliable at
-      // tool-calling — e4b confabulated 'created page X' without ever
-      // calling vault_write. 26b actually executes tools.
-      model: process.env.TOOLS_INFERENCE_MODEL ?? 'gemma4:26b',
+      // qwen36 vllm on tiny-emerson:9000 (raw, not the :8000 wrapper).
+      // Verified end-to-end: streaming + tool_calls deltas + finish_reason
+      // 'tool_calls' on auto + required tool_choice.
+      model: process.env.TOOLS_INFERENCE_MODEL ?? 'qwen36',
     },
   };
 }

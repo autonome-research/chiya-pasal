@@ -1,15 +1,21 @@
 [Unit]
-Description=SSH tunnel: localhost:11435 → tiny-emerson:11434 (Ollama for librarian upsert)
+Description=SSH tunnel: localhost:11435 → tiny-emerson:9000 (raw vllm qwen36 for librarian)
 After=network-online.target
 
 [Service]
 Type=simple
-# Reverse-tunnel tiny-emerson's localhost-bound Ollama to a port on this box.
-# -N: no remote command. -L: local-forward. ServerAliveInterval keeps the
-# tunnel alive across NAT/sleep. ExitOnForwardFailure aborts fast if the
-# forward can't bind.
+# Tunnel tiny-emerson's localhost-bound vllm OpenAI-compatible API to this
+# box. -N: no remote command. -L: local-forward. ServerAliveInterval keeps
+# the tunnel alive across NAT/sleep. ExitOnForwardFailure aborts fast if
+# the forward can't bind.
+#
+# Port 9000 on tiny-emerson is the raw vllm (`vllm serve` with stock tool
+# parsing). DO NOT point this at port 8000 — that's a PI/Hermes wrapper
+# whose chat template hardcodes its own tool surface and ignores the
+# request's `tools` parameter, causing scouts to confabulate rather than
+# invoke real tool calls.
 ExecStart=/usr/bin/ssh \
-  -NL 11435:127.0.0.1:11434 \
+  -NL 11435:127.0.0.1:9000 \
   -o ServerAliveInterval=30 \
   -o ServerAliveCountMax=3 \
   -o ExitOnForwardFailure=yes \
