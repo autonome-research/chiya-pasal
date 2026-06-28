@@ -94,7 +94,6 @@ The project currently relies on these safety patterns:
 - **Dry-run / plan-only librarian modes** for previewing changes.
 - **Doctor/status CLI commands** for operational inspection.
 - **Shared source fetch policy** for API source timeout/retry behavior.
-- **Digest email guard** when daily-cycle mode enables once-daily delivery.
 
 If a change removes or bypasses any of these, call it out explicitly and justify it.
 

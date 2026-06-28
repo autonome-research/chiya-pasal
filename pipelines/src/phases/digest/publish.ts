@@ -3,7 +3,6 @@
 import { requireCtx, type Phase } from 'thread-phase';
 
 import type { DigestCtx } from '../../shared/digest-types.js';
-import { hasSuccessfulDigestEmail } from '../../shared/digest-delivery.js';
 import type { ChiyaEnv } from '../../shared/env.js';
 import { gwsEmailSend } from '../../tools/email.js';
 import { GitOps } from '../../tools/git.js';
@@ -68,25 +67,9 @@ export const squashAndPush = (git: GitOps): Phase<DigestCtx> => ({
   },
 });
 
-export interface EmailSendOptions {
-  onceDaily?: boolean;
-  dbPath?: string;
-}
-
-export const emailSend = (env: ChiyaEnv, options: EmailSendOptions = {}): Phase<DigestCtx> => ({
+export const emailSend = (env: ChiyaEnv): Phase<DigestCtx> => ({
   name: 'email-send',
   async *run(ctx) {
-    if (options.onceDaily && options.dbPath && hasSuccessfulDigestEmail(options.dbPath, ctx.date)) {
-      ctx.emailed = { ok: true, output: 'skipped: email already sent for local date' };
-      yield {
-        type: 'agent_activity',
-        agent: 'email-send',
-        action: 'skipped',
-        detail: `already sent for ${ctx.date}`,
-      };
-      return;
-    }
-
     const digest = requireCtx(ctx, 'digest', 'email-send');
     const html = ctx.digestHtml;
     const result = await gwsEmailSend({

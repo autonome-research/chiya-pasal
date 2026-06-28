@@ -9,7 +9,6 @@ Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](http
 | `intake` | live | every 4h at HH:03 |
 | `librarian` | live (v3 router → scouts → reviewer flow) | every 10 min (drain mode); switch to 30 min once `pending` clears |
 | `digest` | live | 06:30 / 18:30 local |
-| `daily cycle` | optional | 09:00 local catch-up timer: collect → intake → librarian passes → digest/email |
 
 373 tests, all green. `npm test`, `npm run build`.
 
@@ -39,10 +38,6 @@ npm run build
 | `CHIYA_FAST_MAX_TOKENS` | `4000` | Output-token cap for fast-tier digest classify/draft calls. Raised for reasoning models that otherwise spend the full cap on hidden reasoning and return `finishReason: length`. |
 | `CHIYA_SOURCE_TIMEOUT_MS` | `15000` | Per-request timeout for TypeScript API source adapters |
 | `CHIYA_SOURCE_RETRIES` | `1` | Retry count for retryable source HTTP failures (`408`, `429`, `5xx`) |
-| `CHIYA_DIGEST_ONCE_DAILY` | unset (`1` in `run-cycle.sh` / `chiya-daily.service`) | Skip digest email when a successful `email-send` event already exists for the local date |
-| `CHIYA_CYCLE_LIBRARIAN_PASSES` | `5` | Max librarian batches attempted by `run-cycle.sh` before digesting |
-| `CHIYA_CYCLE_LIBRARIAN_BATCH` | `10` | Librarian batch size used by `run-cycle.sh` |
-| `CHIYA_CYCLE_LIBRARIAN_MINUTES` | `8` | Librarian per-pass soft deadline used by `run-cycle.sh` |
 
 The default `localhost:11435` is the SSH tunnel installed via `chiya-tunnel-tiny.service` (forwards to tiny-emerson:11434).
 
@@ -59,7 +54,6 @@ npm run librarian -- --dry-run    # calls agents + previews apply; no vault/git/
 npm run librarian -- --plan-only  # stops after semantic article plans; no apply preview
 npm run digest:am                 # tsx src/digest.ts AM
 npm run digest:pm                 # tsx src/digest.ts PM
-./run-cycle.sh AM                 # collect → intake → librarian drain passes → guarded digest/email
 npm run backfill-archive-articles -- --status=done     # recover dedup memory after DB loss
 npm run backfill-archive-articles -- --status=pending  # re-queue archived resources for graph curation
 ```
@@ -78,9 +72,6 @@ ln -sf ~/chiya-library/pipelines/systemd/chiya-librarian.timer     ~/.config/sys
 ln -sf ~/chiya-library/pipelines/systemd/chiya-digest@.service     ~/.config/systemd/user/
 ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-am.timer     ~/.config/systemd/user/
 ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-pm.timer     ~/.config/systemd/user/
-# Optional once-daily catch-up cycle instead of, or alongside, separate timers:
-ln -sf ~/chiya-library/pipelines/systemd/chiya-daily.service        ~/.config/systemd/user/
-ln -sf ~/chiya-library/pipelines/systemd/chiya-daily.timer          ~/.config/systemd/user/
 
 systemctl --user daemon-reload
 systemctl --user enable --now \
@@ -89,7 +80,6 @@ systemctl --user enable --now \
   chiya-librarian.timer \
   chiya-digest-am.timer \
   chiya-digest-pm.timer
-# Optional: systemctl --user enable --now chiya-daily.timer
 
 systemctl --user list-timers chiya-*
 ```
@@ -101,7 +91,6 @@ Manual triggers:
 systemctl --user start chiya-intake.service
 systemctl --user start chiya-librarian.service
 systemctl --user start chiya-digest@AM.service
-systemctl --user start chiya-daily.service
 journalctl --user -u chiya-librarian.service -f
 ```
 
@@ -170,8 +159,6 @@ emailSend           (pure)   gws gmail +send (--html when HTML body is available
 Email format: the digest keeps a Markdown/plain-text body for logs and fallback, but sends a deterministic HTML fragment when available. Article titles are rendered as embedded links to the original collected source URL; all article/model text is HTML-escaped in TypeScript, and the LLM is never asked to generate HTML. OSF API preprint URLs are converted to human-readable `https://osf.io/<slug>` links, and Zenodo bare record IDs are converted to `https://zenodo.org/records/<id>` before rendering/backfill storage.
 
 Push strategy: many small local commits accumulate (librarian and digest both); the digest's `squashAndPush` rebase-squashes everything since the last push into one commit per push. Result on remote: ~2 commits/day max, each summarizing the work since the last push.
-
-Digest email can be guarded with `CHIYA_DIGEST_ONCE_DAILY=1`: before sending, `digest.ts` checks persisted thread-phase job/event logs for a successful `email-send` event on the same local calendar date. `run-cycle.sh` and `chiya-daily.service` enable this guard by default to prevent duplicate emails from persistent timer catch-up or manual retries. Standalone AM/PM digest timers leave it unset so the existing twice-daily cadence can still send both emails.
 
 ## Crash recovery
 

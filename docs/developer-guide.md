@@ -61,7 +61,6 @@ Rules:
 - run vault/git publishing under the vault mutation lock
 - do not ask LLMs to produce HTML; render email HTML deterministically in TypeScript
 - escape all article/model text before inserting into HTML, and only turn validated source URLs into links
-- preserve digest email idempotency: `digest.ts` uses `digest-delivery.ts` to skip duplicate successful email sends for the same local date when `CHIYA_DIGEST_ONCE_DAILY=1` (enabled by the daily cycle, not by standalone AM/PM digest timers by default)
 - email delivery failures should throw so digest jobs are visibly failed
 
 ## Adding or changing a scout

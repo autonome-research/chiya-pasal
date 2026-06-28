@@ -88,10 +88,7 @@ async function main(): Promise<void> {
       [appendLog(vault), commitDigest(git), squashAndPush(git)],
       'digest-vault-mutation',
     ),
-    emailSend(env, {
-      onceDaily: process.env.CHIYA_DIGEST_ONCE_DAILY === '1',
-      dbPath,
-    }),
+    emailSend(env),
   ];
 
   const store = new SqliteJobStore(dbPath);
