@@ -1,24 +1,32 @@
 /**
  * Resolved environment for the chiya pipelines.
  *
- * Two inference targets, both default to tiny-emerson's vllm (qwen36) via
- * the SSH tunnel (localhost:11435 → tiny-emerson:9000). One model, one
- * endpoint — vllm pins the model in VRAM and serves it concurrently, so
- * no benefit to splitting the targets right now. The split exists in case
- * we want to point the fast tier at a smaller endpoint later.
+ * Inference targets are global — `fast` and `tools` route to the same
+ * tiny-emerson vllm (qwen36) by default via the SSH tunnel at
+ * localhost:11435. Per-user state (vault dir, email_to, vault remote) is
+ * loaded from users.yaml when a handle is passed.
  *
- * - `fast`  — digest classify/draft and librarian summary call. JSON-only
- *             output, no tools.
+ * - `fast`  — digest classify/draft. JSON-only output, no tools.
  * - `tools` — librarian router + scouts + reviewer. Must support OpenAI
- *             tool calling (qwen36 vllm on :9000 does; the PI wrapper on
- *             :8000 does not — see chiya-tunnel-tiny.service).
+ *             tool calling (qwen36 on :9000 does; the PI wrapper on :8000
+ *             does not — see chiya-tunnel-tiny.service).
+ * - `embed` — routing embeddings. qwen3-embed-8b on the spark k8s cluster,
+ *             reached via kubectl port-forward (see chiya-embed.service).
  *
- * VAULT_DIR is the only required env; the tiny-emerson tunnel must be up
- * (see systemd/chiya-tunnel-tiny.service).
+ * Two call modes:
+ * - `loadChiyaEnv()`         — single-tenant legacy. Reads VAULT_DIR and
+ *                              CHIYA_EMAIL_TO from process.env; used by
+ *                              shell scripts and tests during migration.
+ * - `loadChiyaEnvFor(handle)` — multi-tenant. Reads users.yaml and applies
+ *                              the matching user's per-handle overrides.
+ *
+ * Both modes return the same ChiyaEnv shape so downstream code is uniform.
  */
 
 import { homedir } from 'os';
-import { resolve } from 'path';
+import { resolve, join } from 'path';
+
+import { findEnabledUser, loadUsersConfig, type User, type UsersConfig } from './users.js';
 
 export interface InferenceTarget {
   baseUrl: string;
@@ -27,33 +35,26 @@ export interface InferenceTarget {
 }
 
 export interface ChiyaEnv {
+  /** Identifies the user this env was built for; null when single-tenant. */
+  userHandle: string | null;
   vaultDir: string;
   vaultRemote: string;
   vaultBranch: string;
   emailTo: string;
-  /** Fast remote (no tools). Used for triage / classifier / drafter. */
+  /** Per-user routing threshold; null for the single-tenant fallback. */
+  routingThreshold: number | null;
+  /** Per-user interests paragraph; null for the single-tenant fallback. */
+  interests: string | null;
   fast: InferenceTarget;
-  /** Tool-capable. Used for librarian upsert (vault read/write + web fetch). */
   tools: InferenceTarget;
+  embed: InferenceTarget;
+  /** Root of the multi-tenant data dir (where per-user dirs live, and where
+   *  the shared/ cache lives). Defaults to ~/chiya-data. */
+  dataRoot: string;
 }
 
-export function loadChiyaEnv(): ChiyaEnv {
-  // CHIYA_EMAIL_TO is the only required secret-ish var. Systemd loads it
-  // via EnvironmentFile=-%h/chiya-library/pipelines/.env (see service
-  // units); for local dev: `set -a && source .env && set +a` before
-  // running. .env.example documents the expected keys.
-  const emailTo = process.env.CHIYA_EMAIL_TO;
-  if (!emailTo) {
-    throw new Error(
-      'CHIYA_EMAIL_TO is required. Set it in pipelines/.env (gitignored) ' +
-        'or export it in your shell. See pipelines/.env.example.',
-    );
-  }
+function inferenceTargets(): Pick<ChiyaEnv, 'fast' | 'tools' | 'embed'> {
   return {
-    vaultDir: resolve(process.env.VAULT_DIR ?? `${homedir()}/vault`),
-    vaultRemote: process.env.VAULT_REMOTE ?? 'origin',
-    vaultBranch: process.env.VAULT_BRANCH ?? 'main',
-    emailTo,
     fast: {
       baseUrl: process.env.FAST_INFERENCE_BASE_URL ?? 'http://localhost:11435/v1',
       apiKey: process.env.FAST_INFERENCE_API_KEY ?? 'not-needed',
@@ -62,10 +63,75 @@ export function loadChiyaEnv(): ChiyaEnv {
     tools: {
       baseUrl: process.env.TOOLS_INFERENCE_BASE_URL ?? 'http://localhost:11435/v1',
       apiKey: process.env.TOOLS_INFERENCE_API_KEY ?? 'not-needed',
-      // qwen36 vllm on tiny-emerson:9000 (raw, not the :8000 wrapper).
-      // Verified end-to-end: streaming + tool_calls deltas + finish_reason
-      // 'tool_calls' on auto + required tool_choice.
       model: process.env.TOOLS_INFERENCE_MODEL ?? 'qwen36',
     },
+    embed: {
+      baseUrl: process.env.EMBED_INFERENCE_BASE_URL ?? 'http://localhost:11437/v1',
+      apiKey: process.env.EMBED_INFERENCE_API_KEY ?? 'not-needed',
+      model: process.env.EMBED_INFERENCE_MODEL ?? 'qwen3-embed-8b',
+    },
   };
+}
+
+function dataRoot(): string {
+  return resolve(process.env.CHIYA_DATA_ROOT ?? `${homedir()}/chiya-data`);
+}
+
+/**
+ * Single-tenant compatibility path. Reads VAULT_DIR, CHIYA_EMAIL_TO,
+ * VAULT_REMOTE, VAULT_BRANCH directly from process.env. The multi-tenant
+ * entry points use loadChiyaEnvFor instead.
+ */
+export function loadChiyaEnv(): ChiyaEnv {
+  const emailTo = process.env.CHIYA_EMAIL_TO;
+  if (!emailTo) {
+    throw new Error(
+      'CHIYA_EMAIL_TO is required for single-tenant mode. Set it in pipelines/.env ' +
+        'or use loadChiyaEnvFor(handle) with users.yaml.',
+    );
+  }
+  return {
+    userHandle: null,
+    vaultDir: resolve(process.env.VAULT_DIR ?? `${homedir()}/vault`),
+    vaultRemote: process.env.VAULT_REMOTE ?? 'origin',
+    vaultBranch: process.env.VAULT_BRANCH ?? 'main',
+    emailTo,
+    routingThreshold: null,
+    interests: null,
+    dataRoot: dataRoot(),
+    ...inferenceTargets(),
+  };
+}
+
+/**
+ * Multi-tenant: build a ChiyaEnv scoped to one user from users.yaml.
+ *
+ * Per-user vault dir defaults to <dataRoot>/users/<handle>/vault. The
+ * users.yaml controls the user's email, vault remote, interests, and
+ * optional threshold override.
+ */
+export function loadChiyaEnvFor(handle: string, configOverride?: UsersConfig): ChiyaEnv {
+  const config = configOverride ?? loadUsersConfig();
+  const user = findEnabledUser(config, handle);
+  return envFromUser(user);
+}
+
+export function envFromUser(user: User): ChiyaEnv {
+  const root = dataRoot();
+  return {
+    userHandle: user.handle,
+    vaultDir: join(root, 'users', user.handle, 'vault'),
+    vaultRemote: user.vaultRemote,
+    vaultBranch: user.vaultBranch,
+    emailTo: user.emailTo,
+    routingThreshold: user.threshold,
+    interests: user.interests,
+    dataRoot: root,
+    ...inferenceTargets(),
+  };
+}
+
+/** Path to the shared layer's SQLite cache. */
+export function sharedDbPath(env: ChiyaEnv): string {
+  return join(env.dataRoot, 'shared', 'articles.db');
 }

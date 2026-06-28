@@ -1,0 +1,28 @@
+# pipelines/config/users.yaml
+#
+# Source of truth for multi-tenant pipelines. Copy to users.yaml and edit.
+# The admin CLI (npm run admin -- users add/remove/...) manipulates this
+# file; the shared layer routes articles based on it; per-user librarian
+# and digest iterate over it.
+#
+# The file is gitignored because it contains user contact info.
+
+# Default cosine threshold used when a user doesn't override. 0.5 is
+# comfortably inside the empirical discrimination band for qwen3-embed-8b
+# on paragraph-length inputs (matches land 0.60-0.70, non-matches 0.30-0.35).
+default_threshold: 0.5
+
+users:
+  - handle: velvet                   # lowercase, digits, dashes; starts with a letter
+    name: Velvet
+    email_to: velvetmoon222999@gmail.com
+    vault_remote: git@github.com:Code4me2/vault.git
+    vault_branch: main               # optional, default 'main'
+    enabled: true                    # optional, default true
+    onboarded: 2026-06-28            # informational
+    # threshold: 0.55                # optional per-user override
+    interests: |
+      Mechanistic interpretability of large language models. Agentic
+      systems and tool-using architectures. Operational engineering for
+      LLM-based research pipelines on local hardware (vllm, model
+      quantization, kv-cache, deployment patterns).
