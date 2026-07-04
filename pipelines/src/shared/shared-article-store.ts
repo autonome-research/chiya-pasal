@@ -62,6 +62,19 @@ export interface SharedArticleInput {
 
 export type UpsertResult = 'inserted' | 'duplicate';
 
+/** Input shape for logRoutingDecisions — matches routing.ts's RoutingScore. */
+export interface RoutingDecision {
+  stableId: string;
+  userHandle: string;
+  similarity: number;
+  routed: boolean;
+  viaFloor: boolean;
+}
+
+export interface RoutingLogRow extends RoutingDecision {
+  decidedAt: Date;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS shared_article (
   stable_id          TEXT PRIMARY KEY,
@@ -87,6 +100,19 @@ CREATE TABLE IF NOT EXISTS shared_article (
 
 CREATE INDEX IF NOT EXISTS idx_shared_status_collected
   ON shared_article(status, collected_at);
+
+CREATE TABLE IF NOT EXISTS routing_log (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  stable_id    TEXT NOT NULL,
+  user_handle  TEXT NOT NULL,
+  similarity   REAL NOT NULL,
+  routed       INTEGER NOT NULL,
+  via_floor    INTEGER NOT NULL DEFAULT 0,
+  decided_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_routing_log_user
+  ON routing_log(user_handle, decided_at);
 `;
 
 interface RawRow {
@@ -299,6 +325,69 @@ export class SharedArticleStore {
         `UPDATE shared_article SET status = 'failed', status_reason = ? WHERE stable_id = ?`,
       )
       .run(reason.slice(0, 500), stableId);
+  }
+
+  // ---- routing telemetry ----------------------------------------------------
+
+  /**
+   * Persist one routing pass's full score matrix. This is the data that lets
+   * us tune thresholds against real similarity distributions instead of the
+   * 4-sample experiment the default came from. One row per (article, user)
+   * pair evaluated, routed or not.
+   */
+  logRoutingDecisions(decisions: readonly RoutingDecision[]): void {
+    const insert = this.db.prepare(
+      `INSERT INTO routing_log (stable_id, user_handle, similarity, routed, via_floor)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+    const tx = this.db.transaction((rows: readonly RoutingDecision[]) => {
+      for (const d of rows) {
+        insert.run(d.stableId, d.userHandle, d.similarity, d.routed ? 1 : 0, d.viaFloor ? 1 : 0);
+      }
+    });
+    tx(decisions);
+  }
+
+  /**
+   * Similarity samples for threshold tuning. Filter by user and/or a
+   * time window (days back from now).
+   */
+  routingSimilarities(opts: { userHandle?: string; sinceDays?: number; limit?: number } = {}): RoutingLogRow[] {
+    const clauses: string[] = [];
+    const params: (string | number)[] = [];
+    if (opts.userHandle) {
+      clauses.push('user_handle = ?');
+      params.push(opts.userHandle);
+    }
+    if (opts.sinceDays !== undefined) {
+      clauses.push(`decided_at >= datetime('now', ?)`);
+      params.push(`-${opts.sinceDays} days`);
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = opts.limit ?? 10_000;
+    const rows = this.db
+      .prepare(
+        `SELECT stable_id, user_handle, similarity, routed, via_floor, decided_at
+           FROM routing_log ${where}
+          ORDER BY decided_at DESC, id DESC
+          LIMIT ?`,
+      )
+      .all(...params, limit) as Array<{
+        stable_id: string;
+        user_handle: string;
+        similarity: number;
+        routed: number;
+        via_floor: number;
+        decided_at: string;
+      }>;
+    return rows.map((r) => ({
+      stableId: r.stable_id,
+      userHandle: r.user_handle,
+      similarity: r.similarity,
+      routed: r.routed === 1,
+      viaFloor: r.via_floor === 1,
+      decidedAt: new Date(r.decided_at + 'Z'),
+    }));
   }
 
   countByStatus(): Record<SharedStatus, number> {

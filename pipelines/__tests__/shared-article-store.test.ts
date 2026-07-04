@@ -126,6 +126,48 @@ describe('SharedArticleStore lifecycle transitions', () => {
   });
 });
 
+describe('SharedArticleStore routing telemetry', () => {
+  const decisions = [
+    { stableId: 'a1', userHandle: 'alice', similarity: 0.72, routed: true, viaFloor: false },
+    { stableId: 'a1', userHandle: 'bob', similarity: 0.31, routed: false, viaFloor: false },
+    { stableId: 'a2', userHandle: 'alice', similarity: 0.44, routed: true, viaFloor: true },
+  ];
+
+  it('logs a routing pass and reads it back with typed fields', () => {
+    store.logRoutingDecisions(decisions);
+    const rows = store.routingSimilarities();
+    expect(rows).toHaveLength(3);
+    const floored = rows.find((r) => r.stableId === 'a2')!;
+    expect(floored.routed).toBe(true);
+    expect(floored.viaFloor).toBe(true);
+    expect(floored.similarity).toBeCloseTo(0.44, 6);
+    expect(floored.decidedAt).toBeInstanceOf(Date);
+  });
+
+  it('filters by userHandle', () => {
+    store.logRoutingDecisions(decisions);
+    const bobRows = store.routingSimilarities({ userHandle: 'bob' });
+    expect(bobRows).toHaveLength(1);
+    expect(bobRows[0]!.routed).toBe(false);
+  });
+
+  it('respects the limit option', () => {
+    store.logRoutingDecisions(decisions);
+    expect(store.routingSimilarities({ limit: 2 })).toHaveLength(2);
+  });
+
+  it('sinceDays window excludes older rows', () => {
+    store.logRoutingDecisions(decisions);
+    // Everything just inserted is within 1 day.
+    expect(store.routingSimilarities({ sinceDays: 1 })).toHaveLength(3);
+  });
+
+  it('empty decisions array is a no-op', () => {
+    store.logRoutingDecisions([]);
+    expect(store.routingSimilarities()).toHaveLength(0);
+  });
+});
+
 describe('SharedArticleStore.listByStatus + countByStatus', () => {
   it('listByStatus returns oldest-first up to limit', () => {
     for (let i = 0; i < 5; i++) {

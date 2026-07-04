@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest';
 
-import { cosine, routeArticles, userSimilarity, DEFAULT_THRESHOLD } from '../src/shared/routing.js';
+import {
+  cosine,
+  routeArticles,
+  routeArticlesDetailed,
+  userSimilarity,
+  DEFAULT_THRESHOLD,
+} from '../src/shared/routing.js';
 
 describe('cosine', () => {
   it('returns 1 for identical non-zero vectors', () => {
@@ -131,6 +137,92 @@ describe('routeArticles', () => {
     ];
     const matches = routeArticles(articles, [interpUser], { threshold: 0.5 });
     expect(matches.map((m) => m.stableId)).toEqual(['first', 'second']);
+  });
+
+  it('caps matches per user with maxPerUser, keeping the highest-similarity ones', () => {
+    // Three articles all above alice's threshold with distinct sims.
+    const articles = [
+      { stableId: 'low', summaryVector: [0.6, 0, 0.8, 0] },   // sim 0.6
+      { stableId: 'high', summaryVector: [1, 0, 0, 0] },      // sim 1.0
+      { stableId: 'mid', summaryVector: [0.8, 0, 0.6, 0] },   // sim 0.8
+    ];
+    const matches = routeArticles(articles, [interpUser], {
+      threshold: 0.5,
+      maxPerUser: 2,
+    });
+    expect(matches.map((m) => m.stableId).sort()).toEqual(['high', 'mid']);
+  });
+
+  it('tops up a starved user to minPerUser with viaFloor-flagged matches', () => {
+    // Nothing meets alice's 0.9 threshold, but the floor guarantees 2.
+    const articles = [
+      { stableId: 'best', summaryVector: [0.8, 0, 0.6, 0] },   // sim 0.8
+      { stableId: 'ok', summaryVector: [0.6, 0, 0.8, 0] },     // sim 0.6
+      { stableId: 'weak', summaryVector: [0.2, 0, 0.98, 0] },  // sim 0.2
+    ];
+    const matches = routeArticles(articles, [{ ...interpUser, threshold: 0.9 }], {
+      minPerUser: 2,
+    });
+    expect(matches).toHaveLength(2);
+    expect(matches.every((m) => m.viaFloor === true)).toBe(true);
+    expect(matches.map((m) => m.stableId)).toEqual(['best', 'ok']); // highest first
+  });
+
+  it('floor only tops up the deficit when some matches already exist', () => {
+    const articles = [
+      { stableId: 'above', summaryVector: [1, 0, 0, 0] },      // sim 1.0 — real match
+      { stableId: 'below', summaryVector: [0.6, 0, 0.8, 0] },  // sim 0.6 — floored
+      { stableId: 'worst', summaryVector: [0, 0, 1, 0] },      // sim 0 — not needed
+    ];
+    const matches = routeArticles(articles, [{ ...interpUser, threshold: 0.9 }], {
+      minPerUser: 2,
+    });
+    expect(matches).toHaveLength(2);
+    const real = matches.find((m) => m.stableId === 'above')!;
+    const topped = matches.find((m) => m.stableId === 'below')!;
+    expect(real.viaFloor).toBeUndefined();
+    expect(topped.viaFloor).toBe(true);
+  });
+
+  it('throws when minPerUser exceeds maxPerUser', () => {
+    expect(() =>
+      routeArticles([], [interpUser], { minPerUser: 5, maxPerUser: 2 }),
+    ).toThrow(/minPerUser.*must be <= maxPerUser/);
+  });
+
+  it('routeArticlesDetailed returns a score row for every (article, user) pair', () => {
+    const articles = [
+      { stableId: 'a1', summaryVector: [1, 0, 0, 0] },
+      { stableId: 'a2', summaryVector: [0, 0, 1, 0] },
+    ];
+    const { matches, scores } = routeArticlesDetailed(
+      articles,
+      [interpUser, proteinUser],
+      { threshold: 0.5 },
+    );
+    expect(scores).toHaveLength(4); // 2 articles × 2 users
+    expect(matches).toHaveLength(2); // a1→alice, a2→bob
+
+    const a1alice = scores.find((s) => s.stableId === 'a1' && s.userHandle === 'alice')!;
+    expect(a1alice.routed).toBe(true);
+    expect(a1alice.viaFloor).toBe(false);
+    expect(a1alice.similarity).toBeCloseTo(1.0, 6);
+
+    const a1bob = scores.find((s) => s.stableId === 'a1' && s.userHandle === 'bob')!;
+    expect(a1bob.routed).toBe(false);
+    expect(a1bob.similarity).toBeCloseTo(0.0, 6);
+  });
+
+  it('scores mark floored matches with viaFloor and routed both true', () => {
+    const articles = [{ stableId: 'a1', summaryVector: [0.6, 0, 0.8, 0] }];
+    const { scores } = routeArticlesDetailed(
+      articles,
+      [{ ...interpUser, threshold: 0.9 }],
+      { minPerUser: 1 },
+    );
+    expect(scores).toHaveLength(1);
+    expect(scores[0]!.routed).toBe(true);
+    expect(scores[0]!.viaFloor).toBe(true);
   });
 
   it('routes a multi-interest user on their best-matching interest, not a centroid', () => {
