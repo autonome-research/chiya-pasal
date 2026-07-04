@@ -43,8 +43,8 @@ export interface ChiyaEnv {
   emailTo: string;
   /** Per-user routing threshold; null for the single-tenant fallback. */
   routingThreshold: number | null;
-  /** Per-user interests paragraph; null for the single-tenant fallback. */
-  interests: string | null;
+  /** Per-user interest paragraphs (one per area); null for single-tenant fallback. */
+  interests: string[] | null;
   fast: InferenceTarget;
   tools: InferenceTarget;
   embed: InferenceTarget;

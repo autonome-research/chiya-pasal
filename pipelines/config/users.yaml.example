@@ -21,8 +21,18 @@ users:
     enabled: true                    # optional, default true
     onboarded: 2026-06-28            # informational
     # threshold: 0.55                # optional per-user override
-    interests: |
-      Mechanistic interpretability of large language models. Agentic
-      systems and tool-using architectures. Operational engineering for
-      LLM-based research pipelines on local hardware (vllm, model
-      quantization, kv-cache, deployment patterns).
+    #
+    # One paragraph PER DISTINCT INTEREST AREA. Each is embedded separately
+    # and routing matches on the best-scoring one, so unrelated interests
+    # don't blur each other. A single string (instead of a list) also works.
+    interests:
+      - >
+        Mechanistic interpretability of large language models — circuits,
+        sparse autoencoders, probing what internal representations compute.
+      - >
+        Agentic systems and tool-using LLM architectures: planners,
+        multi-step reasoning, orchestration frameworks.
+      - >
+        Operational engineering for LLM-based research pipelines on local
+        hardware — vllm serving, model quantization, kv-cache tuning,
+        deployment patterns.

@@ -44,7 +44,9 @@ describe('parseUsersConfig', () => {
     expect(alice.threshold).toBe(0.55);     // falls back to default
     expect(alice.enabled).toBe(true);        // default
     expect(alice.onboarded).toBe('2026-06-28');
-    expect(alice.interests).toContain('mechanistic interpretability');
+    // Single string coerces to a one-element list.
+    expect(alice.interests).toHaveLength(1);
+    expect(alice.interests[0]).toContain('mechanistic interpretability');
 
     const bob = cfg.users[1]!;
     expect(bob.vaultBranch).toBe('trunk');
@@ -114,6 +116,43 @@ users:
 
   it('rejects when users is not an array', () => {
     expect(() => parseUsersConfig('users: not an array')).toThrow(/users must be an array/);
+  });
+});
+
+describe('parseUsersConfig interests shapes', () => {
+  const base = (interests: string) => `
+users:
+  - handle: a
+    name: A
+    email_to: a@x
+    vault_remote: x
+    interests:${interests}
+`;
+
+  it('accepts a list of paragraphs', () => {
+    const cfg = parseUsersConfig(base(`
+      - Mechanistic interpretability of language models.
+      - De novo protein binder design and structure prediction.
+`));
+    expect(cfg.users[0]!.interests).toHaveLength(2);
+    expect(cfg.users[0]!.interests[1]).toContain('protein binder');
+  });
+
+  it('rejects an empty list', () => {
+    expect(() => parseUsersConfig(base(' []'))).toThrow(/at least one entry/);
+  });
+
+  it('rejects a list containing an empty string', () => {
+    expect(() =>
+      parseUsersConfig(base(`
+      - Valid interest paragraph.
+      - ""
+`)),
+    ).toThrow(/interests\[1\] must be a non-empty string/);
+  });
+
+  it('rejects non-string non-array values', () => {
+    expect(() => parseUsersConfig(base(' 42'))).toThrow(/non-empty string or list/);
   });
 });
 

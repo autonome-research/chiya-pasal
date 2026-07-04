@@ -27,11 +27,14 @@ export interface User {
   vaultRemote: string;
   vaultBranch: string;
   /**
-   * Paragraph-length description of the user's research interests. This
-   * is embedded by the routing layer; bare keyword lists won't work — see
-   * routing.ts for why.
+   * One or more paragraph-length descriptions of the user's research
+   * interests — one paragraph per distinct interest area. Each paragraph is
+   * embedded separately and routing matches on the MAX similarity across
+   * them, so a user interested in two unrelated fields doesn't get a
+   * blurry centroid vector that matches neither. Bare keyword lists won't
+   * work — see routing.ts for why.
    */
-  interests: string;
+  interests: string[];
   /** Optional override of the global default routing threshold. */
   threshold: number;
   enabled: boolean;
@@ -99,6 +102,32 @@ function asBoolean(value: unknown, field: string, defaultValue: boolean): boolea
   return value;
 }
 
+/**
+ * Interests accept either a single string (coerced to a one-element list)
+ * or a list of strings — one per distinct interest area.
+ */
+function asInterests(value: unknown, field: string): string[] {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      throw new UsersConfigError(`${field} must be non-empty`);
+    }
+    return [trimmed];
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      throw new UsersConfigError(`${field} must have at least one entry`);
+    }
+    return value.map((v, i) => {
+      if (typeof v !== 'string' || v.trim().length === 0) {
+        throw new UsersConfigError(`${field}[${i}] must be a non-empty string`);
+      }
+      return v.trim();
+    });
+  }
+  throw new UsersConfigError(`${field} must be a non-empty string or list of strings`);
+}
+
 function parseUser(raw: RawUser, defaultThreshold: number): User {
   const handle = asString(raw.handle, 'user.handle');
   if (!/^[a-z][a-z0-9-]*$/.test(handle)) {
@@ -114,7 +143,7 @@ function parseUser(raw: RawUser, defaultThreshold: number): User {
     vaultBranch: raw.vault_branch === undefined || raw.vault_branch === null
       ? 'main'
       : asString(raw.vault_branch, `user[${handle}].vault_branch`),
-    interests: asString(raw.interests, `user[${handle}].interests`),
+    interests: asInterests(raw.interests, `user[${handle}].interests`),
     threshold: asNumber(raw.threshold, `user[${handle}].threshold`, defaultThreshold),
     enabled: asBoolean(raw.enabled, `user[${handle}].enabled`, true),
     onboarded: asOptionalString(raw.onboarded, `user[${handle}].onboarded`),

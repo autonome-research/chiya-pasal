@@ -18,8 +18,13 @@
 
 export interface RoutingUser {
   handle: string;
-  /** Embedding of the user's interest profile paragraph. */
-  interestVector: number[];
+  /**
+   * One embedding per interest paragraph. Routing scores an article
+   * against a user by the MAX similarity across these vectors — a user
+   * interested in two unrelated fields matches on whichever field the
+   * article is closest to, instead of a blurred centroid matching neither.
+   */
+  interestVectors: number[][];
   /** Optional per-user override of the default threshold. */
   threshold?: number;
 }
@@ -70,14 +75,28 @@ export function cosine(a: readonly number[], b: readonly number[]): number {
   return dot / Math.sqrt(normA * normB);
 }
 
+/** Max cosine similarity between one article vector and a user's interest vectors. */
+export function userSimilarity(
+  summaryVector: readonly number[],
+  interestVectors: readonly number[][],
+): number {
+  let best = -Infinity;
+  for (const iv of interestVectors) {
+    const sim = cosine(summaryVector, iv);
+    if (sim > best) best = sim;
+  }
+  return best === -Infinity ? 0 : best;
+}
+
 /**
  * For each article, return all (user, similarity) pairs whose similarity
  * meets the user's threshold (or the default). Sorted within each article
  * by similarity descending; matches across articles are concatenated in
  * input order.
  *
- * O(articles × users × dim) — fine for the scales we expect (hundreds of
- * articles per cycle, single-digit users, dim=1536).
+ * O(articles × users × vectors × dim) — fine for the scales we expect
+ * (hundreds of articles per cycle, single-digit users, a few interest
+ * paragraphs each, dim=1536).
  */
 export function routeArticles(
   articles: readonly RoutingArticle[],
@@ -91,7 +110,7 @@ export function routeArticles(
   for (const article of articles) {
     const perArticle: RoutingMatch[] = [];
     for (const user of users) {
-      const sim = cosine(article.summaryVector, user.interestVector);
+      const sim = userSimilarity(article.summaryVector, user.interestVectors);
       const threshold = user.threshold ?? defaultThreshold;
       if (sim >= threshold) {
         perArticle.push({

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { cosine, routeArticles, DEFAULT_THRESHOLD } from '../src/shared/routing.js';
+import { cosine, routeArticles, userSimilarity, DEFAULT_THRESHOLD } from '../src/shared/routing.js';
 
 describe('cosine', () => {
   it('returns 1 for identical non-zero vectors', () => {
@@ -29,12 +29,31 @@ describe('cosine', () => {
   });
 });
 
+describe('userSimilarity', () => {
+  it('takes the max across multiple interest vectors', () => {
+    const interests = [
+      [1, 0, 0, 0], // interpretability
+      [0, 0, 1, 0], // protein design
+    ];
+    // Article aligned with the SECOND interest should score ~1, not the
+    // centroid's ~0.7.
+    expect(userSimilarity([0, 0, 1, 0], interests)).toBeCloseTo(1.0, 6);
+    expect(userSimilarity([1, 0, 0, 0], interests)).toBeCloseTo(1.0, 6);
+    // Orthogonal to both → 0.
+    expect(userSimilarity([0, 1, 0, 0], interests)).toBeCloseTo(0.0, 6);
+  });
+
+  it('returns 0 for an empty interest list', () => {
+    expect(userSimilarity([1, 0], [])).toBe(0);
+  });
+});
+
 describe('routeArticles', () => {
   // Test users live in mutually orthogonal dimensions so we can control
   // exactly which user a given article vector aligns with.
-  const interpUser = { handle: 'alice', interestVector: [1, 0, 0, 0] };
-  const proteinUser = { handle: 'bob', interestVector: [0, 0, 1, 0] };
-  const physicsUser = { handle: 'carol', interestVector: [0, 0, 0, 1] };
+  const interpUser = { handle: 'alice', interestVectors: [[1, 0, 0, 0]] };
+  const proteinUser = { handle: 'bob', interestVectors: [[0, 0, 1, 0]] };
+  const physicsUser = { handle: 'carol', interestVectors: [[0, 0, 0, 1]] };
 
   it('routes an article to every user whose interest is above threshold', () => {
     const articles = [
@@ -112,5 +131,22 @@ describe('routeArticles', () => {
     ];
     const matches = routeArticles(articles, [interpUser], { threshold: 0.5 });
     expect(matches.map((m) => m.stableId)).toEqual(['first', 'second']);
+  });
+
+  it('routes a multi-interest user on their best-matching interest, not a centroid', () => {
+    // dave has two unrelated interests. An article squarely in his second
+    // area must route to him even though the centroid of his two vectors
+    // would sit at [0.5, 0, 0.5, 0] → cos ≈ 0.707 vs the pure axis ≈ 1.0.
+    const dave = {
+      handle: 'dave',
+      interestVectors: [
+        [1, 0, 0, 0],
+        [0, 0, 1, 0],
+      ],
+    };
+    const article = [{ stableId: 'protein-art', summaryVector: [0, 0, 1, 0] }];
+    const matches = routeArticles(article, [dave], { threshold: 0.9 });
+    expect(matches).toHaveLength(1);
+    expect(matches[0]!.similarity).toBeCloseTo(1.0, 6);
   });
 });
