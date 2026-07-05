@@ -92,7 +92,6 @@ export const loadBatch = (store: ArticleStore, options: LoadBatchOptions = {}): 
 const ENRICH_SNIPPET_THRESHOLD = 200;
 const ENRICH_CONCURRENCY = 4;
 const ENRICH_FETCH_TIMEOUT_MS = 15_000;
-const ENRICH_BODY_CAP = 50_000;
 const ENRICH_USER_AGENT = 'chiya-librarian/2.0';
 
 /**
@@ -107,37 +106,12 @@ export function shouldFetch(article: { snippet: string | null; url: string | nul
   return true;
 }
 
-/**
- * Minimal HTML→plain-text pass for enrichment bodies. Not a full parser:
- *   - Drop <script> / <style> blocks (with content) entirely.
- *   - Turn block-ish open tags (<br>, <p>, <div>, <li>) into newlines.
- *   - Strip everything else that looks like a tag.
- *   - Decode the small set of HTML entities we actually see in the wild.
- *   - Collapse whitespace runs and cap length.
- */
-export function htmlToText(html: string): string {
-  if (!html) return '';
-  let s = html;
-  // Drop script/style blocks (with their contents) before any other tag pass.
-  s = s.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, ' ');
-  s = s.replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, ' ');
-  // Block-ish open tags become newlines so paragraph boundaries survive.
-  s = s.replace(/<(?:br|p|div|li)\b[^>]*\/?>/gi, '\n');
-  // Strip every remaining tag.
-  s = s.replace(/<\/?[a-zA-Z][^>]*>/g, '');
-  // Decode the entities we care about. Order matters for &amp;.
-  s = s
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&');
-  // Collapse whitespace runs. Keep newlines as a single \n separator.
-  s = s.replace(/[ \t\r\f\v]+/g, ' ').replace(/\s*\n\s*/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-  if (s.length > ENRICH_BODY_CAP) s = s.slice(0, ENRICH_BODY_CAP);
-  return s;
-}
+// HTML stripping now lives in the shared fulltext module (the shared enrich
+// phase is its long-term home). Imported + re-exported here because this
+// phase and its tests still consume it until the librarian's own enrich
+// step is retired in the multi-tenant cutover.
+import { htmlToText } from '../shared/fulltext.js';
+export { htmlToText };
 
 interface FetchOutcome {
   body: string;
