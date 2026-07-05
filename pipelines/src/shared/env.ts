@@ -135,3 +135,33 @@ export function envFromUser(user: User): ChiyaEnv {
 export function sharedDbPath(env: ChiyaEnv): string {
   return join(env.dataRoot, 'shared', 'articles.db');
 }
+
+/**
+ * Environment for the shared pipeline. Deliberately does NOT require
+ * CHIYA_EMAIL_TO — the shared layer never emails; per-user email lives in
+ * users.yaml. Unpaywall email is optional: without it the OA enrichment
+ * rung is skipped (with a startup warning), everything else works.
+ */
+export interface SharedEnv {
+  dataRoot: string;
+  /** <dataRoot>/shared/articles.db — cache + job log for the shared layer. */
+  sharedDb: string;
+  /** Where matcha's *-articles.md files land. */
+  inboxDir: string;
+  unpaywallEmail: string | null;
+  fast: InferenceTarget;
+  embed: InferenceTarget;
+}
+
+export function loadSharedEnv(): SharedEnv {
+  const root = dataRoot();
+  const targets = inferenceTargets();
+  return {
+    dataRoot: root,
+    sharedDb: join(root, 'shared', 'articles.db'),
+    inboxDir: resolve(process.env.CHIYA_SHARED_INBOX ?? join(root, 'shared', 'inbox')),
+    unpaywallEmail: process.env.CHIYA_UNPAYWALL_EMAIL?.trim() || null,
+    fast: targets.fast,
+    embed: targets.embed,
+  };
+}

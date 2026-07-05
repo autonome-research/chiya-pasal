@@ -1,0 +1,13 @@
+[Unit]
+Description=Chiya shared pipeline — every 30 min
+
+[Timer]
+# matcha collects every 4h; the 30-min cadence spreads summarization load
+# across the day instead of one big burst, and drains any retry-later
+# backlog. Most ticks are cheap no-ops.
+OnCalendar=*:07/30
+Persistent=true
+Unit=chiya-shared.service
+
+[Install]
+WantedBy=timers.target

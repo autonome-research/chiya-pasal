@@ -13,6 +13,7 @@
     "digest:pm": "tsx src/digest.ts PM",
     "librarian": "tsx src/librarian.ts",
     "intake": "tsx src/intake.ts",
+    "shared": "tsx src/shared-pipeline.ts",
     "doctor": "tsx src/doctor.ts",
     "status": "tsx src/status.ts",
     "migrate-queue": "tsx scripts/migrate-queue.ts",

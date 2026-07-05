@@ -1,0 +1,163 @@
+/**
+ * Shared pipeline entry point — the multi-tenant layer that runs ONCE per
+ * cycle regardless of user count:
+ *
+ *   absorb   matcha inbox files → SharedArticleStore (dedup, stable IDs)
+ *   enrich   full-text ladder: arXiv HTML → direct URL → Unpaywall OA
+ *   summarize one rich structured summary per article (fast tier)
+ *   embed    summary embeddings (qwen3-embed via port-forward)
+ *   route    cosine-match against user interests; COPY matches into each
+ *            user's per-user ArticleStore; log score matrix for tuning
+ *
+ * No vault writes, no git, no email — those stay per-user. Missing
+ * users.yaml downgrades gracefully: collection/summarization still run,
+ * routing skips (so the cache warms before the first user onboards).
+ *
+ * Usage: tsx src/shared-pipeline.ts [--minutes=M]
+ */
+
+import { mkdirSync } from 'fs';
+import { join } from 'path';
+import {
+  PipelineCache,
+  SqliteJobStore,
+  JobRunner,
+} from 'thread-phase';
+import OpenAI from 'openai';
+
+import { loadSharedEnv, envFromUser, type InferenceTarget } from './shared/env.js';
+import { SharedArticleStore } from './shared/shared-article-store.js';
+import { ArticleStore } from './shared/article-store.js';
+import { loadUsersConfig, listEnabledUsers, type User } from './shared/users.js';
+import { installShutdownHandlers } from './shared/shutdown.js';
+import { sweepStaleJobLock } from './shared/sweep-stale-job.js';
+import type { SharedPipelineCtx } from './shared/shared-pipeline-types.js';
+import { VaultFs } from './tools/vault.js';
+import { scanSharedInbox, absorbInbox } from './phases/shared/absorb.js';
+import { enrichPending } from './phases/shared/enrich.js';
+import { summarizeEnriched } from './phases/shared/summarize.js';
+import { embedSummaries, routeEmbedded } from './phases/shared/route.js';
+
+function parseArgs(): { minutes: number } {
+  let minutes = 25;
+  for (const arg of process.argv.slice(2)) {
+    const m = /^--minutes=(\d+)$/.exec(arg);
+    if (!m) throw new Error(`unknown shared-pipeline argument: ${arg}`);
+    minutes = parseInt(m[1]!, 10);
+  }
+  return { minutes };
+}
+
+function clientFor(target: InferenceTarget): OpenAI {
+  return new OpenAI({ baseURL: target.baseUrl, apiKey: target.apiKey });
+}
+
+function loadUsersOrEmpty(): User[] {
+  try {
+    return listEnabledUsers(loadUsersConfig());
+  } catch (err) {
+    console.warn(
+      `[shared] users.yaml unavailable (${err instanceof Error ? err.message : err}) — ` +
+        'collection/summarization will run; routing is skipped',
+    );
+    return [];
+  }
+}
+
+async function main(): Promise<void> {
+  const { minutes } = parseArgs();
+  const env = loadSharedEnv();
+
+  mkdirSync(env.inboxDir, { recursive: true });
+  mkdirSync(join(env.dataRoot, 'shared'), { recursive: true });
+
+  const users = loadUsersOrEmpty();
+  console.log(
+    `[shared] inbox=${env.inboxDir} db=${env.sharedDb} users=${users.length} minutes=${minutes}\n` +
+      `         summarize: ${env.fast.baseUrl}/${env.fast.model}\n` +
+      `         embed:     ${env.embed.baseUrl}/${env.embed.model}` +
+      (env.unpaywallEmail ? '' : '\n         WARN: CHIYA_UNPAYWALL_EMAIL unset — OA enrichment rung disabled'),
+  );
+
+  const inboxFs = new VaultFs(env.inboxDir);
+  const store = new SharedArticleStore(env.sharedDb);
+  const jobStore = new SqliteJobStore(env.sharedDb);
+  const runner = new JobRunner(jobStore);
+
+  const deadlineController = new AbortController();
+  const deadlineTimer = setTimeout(
+    () => deadlineController.abort('deadline-reached'),
+    minutes * 60 * 1000,
+  );
+
+  const ctx: SharedPipelineCtx = {
+    cache: new PipelineCache(),
+    signal: deadlineController.signal,
+  };
+
+  const openUserStore = (handle: string): ArticleStore => {
+    const user = users.find((u) => u.handle === handle);
+    if (!user) throw new Error(`route produced a match for unknown user '${handle}'`);
+    const userEnv = envFromUser(user);
+    mkdirSync(userEnv.vaultDir, { recursive: true });
+    return new ArticleStore(join(userEnv.vaultDir, '.chiya-pipelines.db'));
+  };
+
+  const phases = [
+    scanSharedInbox(inboxFs),
+    absorbInbox(inboxFs, store),
+    enrichPending(store, { unpaywallEmail: env.unpaywallEmail }),
+    summarizeEnriched(store, { client: clientFor(env.fast), model: env.fast.model }),
+    embedSummaries(store, env.embed),
+    routeEmbedded(store, users, env.embed, { openUserStore }),
+  ];
+
+  // Clear orphaned lock rows from a previous crashed run (systemd hard-kills
+  // at 30 min; anything older than 40 min is unambiguously dead).
+  const swept = sweepStaleJobLock(env.sharedDb, 'chiya-shared', 40);
+  if (swept > 0) console.log(`[shared] swept ${swept} stale lock row(s)`);
+
+  const jobId = jobStore.acquireExclusive('chiya-shared', { minutes, users: users.length });
+  if (!jobId) {
+    console.log('[shared] another run already in flight — exiting cleanly');
+    clearTimeout(deadlineTimer);
+    store.close();
+    jobStore.close();
+    return;
+  }
+  runner.on(`job:${jobId}`, (e: { eventType: string; data: unknown }) =>
+    console.log(`[event:${e.eventType}]`, JSON.stringify(e.data)),
+  );
+
+  const disposeShutdown = installShutdownHandlers('shared', (signal) => {
+    if (!deadlineController.signal.aborted) deadlineController.abort(`received ${signal}`);
+    runner.cancel(jobId, `received ${signal}`);
+  });
+
+  try {
+    await runner.run(jobId, phases, ctx, () => ({
+      absorb: ctx.absorbCounts,
+      enrich: ctx.enrichCounts,
+      summarize: ctx.summarizeCounts,
+      embedded: ctx.embeddedCount,
+      route: ctx.routeCounts,
+      counts: store.countByStatus(),
+    }));
+  } finally {
+    disposeShutdown();
+    clearTimeout(deadlineTimer);
+  }
+
+  const final = jobStore.getJob(jobId);
+  console.log(`[shared] job ${jobId} → ${final?.status}`);
+  console.log('[shared] cache state:', store.countByStatus());
+
+  store.close();
+  jobStore.close();
+  if (final?.status === 'FAILED') process.exit(1);
+}
+
+main().catch((err) => {
+  console.error('[shared] fatal:', err);
+  process.exit(1);
+});

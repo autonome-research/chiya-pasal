@@ -1,0 +1,16 @@
+[Unit]
+Description=kubectl port-forward: localhost:11437 → qwen3-embed (spark k8s)
+After=network-online.target
+
+[Service]
+Type=simple
+# The embeddings vllm runs as a pod in the spark namespace; kubectl
+# port-forward is the supported way to reach a ClusterIP service from the
+# host. Restart=always re-establishes the forward when the pod restarts
+# or the API connection drops (port-forward is not self-healing).
+ExecStart=/usr/bin/env kubectl -n spark port-forward svc/qwen3-embed 11437:8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

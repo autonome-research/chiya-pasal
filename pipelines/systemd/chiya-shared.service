@@ -1,0 +1,17 @@
+[Unit]
+Description=Chiya shared pipeline — absorb, enrich, summarize, embed, route
+Documentation=https://github.com/autonome-research/chiya-pasal
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/chiya-library/pipelines
+# Rebuild the better-sqlite3 native binding against the running Node ABI.
+ExecStartPre=/usr/bin/env npm rebuild better-sqlite3 --silent
+# In-pipeline soft deadline 25 min; full-text summarization is the slow
+# step and the FSM resumes cleanly wherever a run leaves off.
+ExecStart=/usr/bin/env npx tsx src/shared-pipeline.ts --minutes=25
+EnvironmentFile=-%h/chiya-library/pipelines/.env
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=1800
