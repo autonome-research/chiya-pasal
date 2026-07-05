@@ -32,6 +32,13 @@ export interface ArticleRow {
   statusReason: string | null;
   processedAt: Date | null;
   pagePaths: string[];
+  /** Refs pre-extracted by the shared layer; null on legacy/single-tenant rows. */
+  refsArxiv: string[] | null;
+  refsDoi: string[] | null;
+  /** Provenance pointer into the shared cache; null when not routed. */
+  sharedStableId: string | null;
+  /** Cosine similarity at routing time; null when not routed. */
+  routedSimilarity: number | null;
 }
 
 export interface ArticleInput {
@@ -47,6 +54,26 @@ export interface ArticleInput {
 }
 
 export type UpsertResult = 'inserted' | 'duplicate-url' | 'duplicate-title';
+
+/**
+ * Input for rows the multi-tenant routing layer copies into a user's store.
+ * The rich summary rides in `summary` (stored in the snippet column — it IS
+ * the body the per-user librarian works from); refs are pre-extracted by the
+ * shared enrich phase so the per-user pipeline never re-fetches full text.
+ */
+export interface RoutedArticleInput {
+  title: string;
+  url: string;
+  source: string | null;
+  field: string | null;
+  /** Rich summary from the shared summarize phase. */
+  summary: string;
+  refsArxiv: string[];
+  refsDoi: string[];
+  sharedStableId: string;
+  routedSimilarity: number;
+  collectedAt?: Date;
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS article (
@@ -74,6 +101,20 @@ CREATE INDEX IF NOT EXISTS idx_article_status_collected
   ON article(status, collected_at);
 `;
 
+/**
+ * Columns added after the original schema shipped. Applied idempotently on
+ * every open: SQLite's ALTER TABLE ADD COLUMN is metadata-only (no table
+ * rewrite), and checking PRAGMA table_info first keeps re-opens silent.
+ * Additive-nullable only — never widen this mechanism into destructive
+ * migrations.
+ */
+const COLUMN_MIGRATIONS: ReadonlyArray<{ name: string; ddl: string }> = [
+  { name: 'refs_arxiv', ddl: 'ALTER TABLE article ADD COLUMN refs_arxiv TEXT' },
+  { name: 'refs_doi', ddl: 'ALTER TABLE article ADD COLUMN refs_doi TEXT' },
+  { name: 'shared_stable_id', ddl: 'ALTER TABLE article ADD COLUMN shared_stable_id TEXT' },
+  { name: 'routed_similarity', ddl: 'ALTER TABLE article ADD COLUMN routed_similarity REAL' },
+];
+
 interface RawRow {
   id: number;
   url: string | null;
@@ -89,6 +130,10 @@ interface RawRow {
   status_reason: string | null;
   processed_at: string | null;
   page_paths: string;
+  refs_arxiv: string | null;
+  refs_doi: string | null;
+  shared_stable_id: string | null;
+  routed_similarity: number | null;
 }
 
 function parseDate(s: string | null): Date | null {
@@ -120,6 +165,40 @@ export class ArticleStore {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.exec(SCHEMA);
+    this.applyColumnMigrations();
+  }
+
+  private applyColumnMigrations(): void {
+    const existing = new Set(
+      (this.db.prepare(`PRAGMA table_info(article)`).all() as Array<{ name: string }>).map(
+        (c) => c.name,
+      ),
+    );
+    for (const m of COLUMN_MIGRATIONS) {
+      if (!existing.has(m.name)) this.db.exec(m.ddl);
+    }
+  }
+
+  /**
+   * Shared dedup check for both upsert paths. Returns the duplicate verdict
+   * or null when the article is new. url_hash wins over title_hash (a URL
+   * match is definitive; a title match is conservative first-pass dedup).
+   */
+  private findDuplicate(
+    urlHash: string | null,
+    titleHash: string,
+  ): { result: 'duplicate-url' | 'duplicate-title'; id: number } | null {
+    if (urlHash) {
+      const existing = this.db
+        .prepare(`SELECT id FROM article WHERE url_hash = ?`)
+        .get(urlHash) as { id: number } | undefined;
+      if (existing) return { result: 'duplicate-url', id: existing.id };
+    }
+    const titleDup = this.db
+      .prepare(`SELECT id FROM article WHERE title_hash = ? LIMIT 1`)
+      .get(titleHash) as { id: number } | undefined;
+    if (titleDup) return { result: 'duplicate-title', id: titleDup.id };
+    return null;
   }
 
   /**
@@ -136,17 +215,8 @@ export class ArticleStore {
     const urlHash = normalizedUrl ? sha256(normalizedUrl) : null;
     const titleHash = sha256(normalizeTitle(input.title));
 
-    if (urlHash) {
-      const existing = this.db
-        .prepare(`SELECT id FROM article WHERE url_hash = ?`)
-        .get(urlHash) as { id: number } | undefined;
-      if (existing) return { result: 'duplicate-url', id: existing.id };
-    }
-
-    const titleDup = this.db
-      .prepare(`SELECT id FROM article WHERE title_hash = ? LIMIT 1`)
-      .get(titleHash) as { id: number } | undefined;
-    if (titleDup) return { result: 'duplicate-title', id: titleDup.id };
+    const dup = this.findDuplicate(urlHash, titleHash);
+    if (dup) return dup;
 
     const stmt = this.db.prepare(
       `INSERT INTO article (url, url_hash, title, title_hash, source, field, snippet,
@@ -163,6 +233,46 @@ export class ArticleStore {
       input.snippet,
       input.collectedAt ? input.collectedAt.toISOString().slice(0, 19).replace('T', ' ') : null,
       input.collectedFrom,
+    );
+    return { result: 'inserted', id: Number(result.lastInsertRowid) };
+  }
+
+  /**
+   * Insert a row routed from the shared layer. Same dedup contract as
+   * upsertPending (url wins, title fallback) so re-routing an article a
+   * user already has — from an earlier cycle, or from the pre-multi-tenant
+   * era — is a clean no-op.
+   *
+   * collected_from is fixed to 'shared-router' for audit; the rich summary
+   * is stored as the snippet (it IS the body the librarian works from).
+   */
+  upsertRouted(input: RoutedArticleInput): { result: UpsertResult; id: number | null } {
+    const normalizedUrl = normalizeUrl(normalizeSourceUrl(input.url, input.source));
+    const urlHash = normalizedUrl ? sha256(normalizedUrl) : null;
+    const titleHash = sha256(normalizeTitle(input.title));
+
+    const dup = this.findDuplicate(urlHash, titleHash);
+    if (dup) return dup;
+
+    const stmt = this.db.prepare(
+      `INSERT INTO article (url, url_hash, title, title_hash, source, field, snippet,
+                            collected_at, collected_from,
+                            refs_arxiv, refs_doi, shared_stable_id, routed_similarity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), 'shared-router', ?, ?, ?, ?)`,
+    );
+    const result = stmt.run(
+      normalizedUrl,
+      urlHash,
+      input.title,
+      titleHash,
+      input.source,
+      input.field,
+      input.summary,
+      input.collectedAt ? input.collectedAt.toISOString().slice(0, 19).replace('T', ' ') : null,
+      JSON.stringify(input.refsArxiv),
+      JSON.stringify(input.refsDoi),
+      input.sharedStableId,
+      input.routedSimilarity,
     );
     return { result: 'inserted', id: Number(result.lastInsertRowid) };
   }
@@ -435,5 +545,9 @@ function toArticleRow(r: RawRow): ArticleRow {
     statusReason: r.status_reason,
     processedAt: parseDate(r.processed_at),
     pagePaths: JSON.parse(r.page_paths),
+    refsArxiv: r.refs_arxiv ? JSON.parse(r.refs_arxiv) : null,
+    refsDoi: r.refs_doi ? JSON.parse(r.refs_doi) : null,
+    sharedStableId: r.shared_stable_id ?? null,
+    routedSimilarity: r.routed_similarity ?? null,
   };
 }

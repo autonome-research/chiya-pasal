@@ -350,3 +350,64 @@ describe('ArticleStore.searchByTitle', () => {
   });
 });
 
+
+describe('ArticleStore routed rows (multi-tenant copy path)', () => {
+  const routedInput = {
+    title: 'Sparse autoencoders decompose superposition',
+    url: 'https://arxiv.org/abs/2605.99999',
+    source: 'arXiv',
+    field: 'AI/ML',
+    summary: '## Overview\nSAEs as an interpretability tool.\n\n## Findings\nFeatures scale.',
+    refsArxiv: ['1607.08221'],
+    refsDoi: ['10.1145/3580305.3599350'],
+    sharedStableId: 'arxiv-2605-99999',
+    routedSimilarity: 0.68,
+  };
+
+  it('upsertRouted inserts with summary as snippet and routed metadata', () => {
+    const r = store.upsertRouted(routedInput);
+    expect(r.result).toBe('inserted');
+    const row = store.getById(r.id!)!;
+    expect(row.status).toBe('pending');
+    expect(row.snippet).toContain('## Overview');
+    expect(row.collectedFrom).toBe('shared-router');
+    expect(row.refsArxiv).toEqual(['1607.08221']);
+    expect(row.refsDoi).toEqual(['10.1145/3580305.3599350']);
+    expect(row.sharedStableId).toBe('arxiv-2605-99999');
+    expect(row.routedSimilarity).toBeCloseTo(0.68, 6);
+  });
+
+  it('upsertRouted dedups against an existing row by url', () => {
+    store.upsertPending({ ...baseInput, url: routedInput.url, title: 'different title' });
+    const r = store.upsertRouted(routedInput);
+    expect(r.result).toBe('duplicate-url');
+  });
+
+  it('upsertRouted dedups by title when url differs', () => {
+    store.upsertRouted(routedInput);
+    const r = store.upsertRouted({ ...routedInput, url: 'https://example.com/mirror' });
+    expect(r.result).toBe('duplicate-title');
+  });
+
+  it('legacy rows read back with null routed metadata', () => {
+    const r = store.upsertPending(baseInput);
+    const row = store.getById(r.id!)!;
+    expect(row.refsArxiv).toBeNull();
+    expect(row.refsDoi).toBeNull();
+    expect(row.sharedStableId).toBeNull();
+    expect(row.routedSimilarity).toBeNull();
+  });
+
+  it('column migration is idempotent across store re-opens', () => {
+    const dbPath = join(dir, 'test.db');
+    store.upsertRouted(routedInput);
+    store.close();
+    // Re-open twice; ALTER TABLE must not re-fire or clobber data.
+    const second = new ArticleStore(dbPath);
+    second.close();
+    store = new ArticleStore(dbPath);
+    const rows = store.listPending(10);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.sharedStableId).toBe('arxiv-2605-99999');
+  });
+});
