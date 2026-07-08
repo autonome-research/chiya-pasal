@@ -27,8 +27,6 @@ import { VaultFs } from './tools/vault.js';
 import {
   reapStale,
   loadBatch,
-  batchEnrich,
-  batchExtractRefs,
   mergeMetadata,
   commitLocal,
 } from './phases/librarian-phases.js';
@@ -79,8 +77,7 @@ async function main(): Promise<void> {
 
   console.log(
     `[librarian] vault=${env.vaultDir} db=${dbPath} batch=${batchSize} minutes=${minutes} mode=${planOnly ? 'plan-only' : dryRun ? 'dry-run' : 'apply'}\n` +
-      `            tools:   ${env.tools.baseUrl}/${env.tools.model}\n` +
-      `            summary: ${env.fast.baseUrl}/${env.fast.model}`,
+      `            tools: ${env.tools.baseUrl}/${env.tools.model}`,
   );
 
   const vault = new VaultFs(env.vaultDir);
@@ -107,20 +104,13 @@ async function main(): Promise<void> {
     dryRun,
   };
 
-  // Tools tier (gemma4:26b) for router + scouts + reviewer; fast tier
-  // (gemma4:e4b) for the per-article summary call.
+  // One inference dependency: the tools tier for router + scouts + reviewer.
+  // Summaries arrive pre-computed from the shared pipeline (snippet column).
   const planningPhases = [
     ...(dryRun ? [] : [reapStale(store)]),
     loadBatch(store, { dryRun }),
-    batchEnrich(),
-    batchExtractRefs(),
     planArticleTree(
-      {
-        toolsClient: clientFor(env.tools),
-        toolsModel: env.tools.model,
-        summaryClient: clientFor(env.fast),
-        summaryModel: env.fast.model,
-      },
+      { toolsClient: clientFor(env.tools), toolsModel: env.tools.model },
       vault,
       store,
     ),

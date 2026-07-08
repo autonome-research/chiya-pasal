@@ -4,6 +4,10 @@
  * Sources are first-class wiki pages, topics are routing nodes. Each
  * article goes through router → 4 scouts (parallel) → reviewer →
  * deterministic write. See the phase composition in src/librarian.ts.
+ *
+ * The per-user librarian consumes rows the shared pipeline routed in:
+ * the article's snippet IS its rich summary, and refs arrive pre-extracted
+ * in columns. There is no per-user fetching or summarization.
  */
 
 import type { BasePipelineContext } from 'thread-phase';
@@ -12,18 +16,9 @@ import type { ArticleRow } from './article-store.js';
 import type { StableId } from '../phases/page-templates.js';
 import type { ReviewerOutput } from '../phases/reviewer.js';
 
-/** Per-article enriched body — full text fetched (or original snippet if no fetch was needed). */
-export interface EnrichedArticle {
-  articleId: number;
-  /** What we use for downstream phases. May equal the original snippet if no fetch fired. */
-  body: string;
-  /** True iff we actually web_fetch'd; false if we kept the snippet as-is. */
-  enriched: boolean;
-  /** HTTP error or fetch skip-reason; only set when enriched=false and a fetch was attempted. */
-  enrichError?: string;
-}
-
-/** Refs extracted from one article's enriched body. */
+/** Refs for one article — from the shared router's columns, or a regex
+ *  fallback over the body for rows that predate routing. Consumed by the
+ *  librarian-router prompt and the cite-tracker scout. */
 export interface ExtractedRefs {
   articleId: number;
   arxivIds: string[];
@@ -54,7 +49,9 @@ export interface PlannedArticle {
   stableId: StableId;
   sourceFilename: string;
   sourcePath: string;
-  body: string;
+  /** The article's rich summary (shared pipeline) or raw snippet (legacy
+   *  rows) — whatever served as the scouts' body, destined for the source
+   *  page. */
   summary: string;
   reviewer: ReviewerOutput;
 }
@@ -87,13 +84,7 @@ export interface LibrarianCtx extends BasePipelineContext {
   // Set by loadBatch.
   batch?: ArticleRow[];
 
-  // Set by batchEnrich.
-  enriched?: EnrichedArticle[];
-
-  // Set by batchExtractRefs.
-  refs?: ExtractedRefs[];
-
-  // Set by the per-article planner (router → scouts → reviewer → summary).
+  // Set by the per-article planner (router → scouts → reviewer).
   articlePlans?: ArticlePlanResult[];
 
   // Set by the serial deterministic apply phase.

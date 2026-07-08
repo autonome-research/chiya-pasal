@@ -120,6 +120,17 @@ function slugToTitle(slug: string): string {
     .join(' ');
 }
 
+/**
+ * Demote H2 headings to H3. The rich summaries from the shared pipeline
+ * carry their own `## Overview` / `## Findings` sections; source pages
+ * embed them under a `## Summary` heading, so the summary's sections must
+ * sit one level deeper to keep the page outline coherent in Obsidian.
+ * No-op for prose summaries (legacy rows) and deeper headings.
+ */
+export function demoteH2(markdown: string): string {
+  return markdown.replace(/^## (?!#)/gm, '### ');
+}
+
 export function formatSourcePage(input: SourcePageInput): string {
   const collectedYmd = ymd(input.collected);
   const sourceLabel = input.sourceName ?? 'unknown';
@@ -152,7 +163,7 @@ export function formatSourcePage(input: SourcePageInput): string {
     '',
     '## Summary',
     '',
-    input.summary,
+    demoteH2(input.summary),
     '',
     '## Topics',
     '',

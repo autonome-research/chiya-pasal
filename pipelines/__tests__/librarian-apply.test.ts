@@ -54,7 +54,6 @@ function planned(row: ArticleRow, summary = 'Summary text.'): PlannedArticle {
     stableId,
     sourceFilename,
     sourcePath: `wiki/sources/${sourceFilename}.md`,
-    body: row.snippet ?? '',
     summary,
     reviewer: {
       topics: [{ slug: 'llm-evaluation', why: 'directly relevant' }],

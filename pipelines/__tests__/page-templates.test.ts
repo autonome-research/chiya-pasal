@@ -7,6 +7,7 @@ import {
   appendMemberSource,
   appendCitedBy,
   bumpFrontmatterField,
+  demoteH2,
   type StableId,
   type SourcePageInput,
   type TopicPageInput,
@@ -496,5 +497,40 @@ describe('bumpFrontmatterField', () => {
   it('returns text unchanged if no frontmatter present', () => {
     const noFm = '# Just a body\n\nNothing else.\n';
     expect(bumpFrontmatterField(noFm, 'foo', 'bar')).toBe(noFm);
+  });
+});
+
+describe('demoteH2 (rich summaries nested under ## Summary)', () => {
+  it('demotes H2 headings to H3, leaving other levels alone', () => {
+    const summary = '## Overview\nProse.\n\n## Findings\nMore prose.\n\n# NotTouched\n### AlreadyH3';
+    expect(demoteH2(summary)).toBe(
+      '### Overview\nProse.\n\n### Findings\nMore prose.\n\n# NotTouched\n### AlreadyH3',
+    );
+  });
+
+  it('is a no-op for plain prose (legacy snippet summaries)', () => {
+    const prose = 'Just a plain paragraph. Nothing structured.';
+    expect(demoteH2(prose)).toBe(prose);
+  });
+
+  it('formatSourcePage nests a structured summary one level below ## Summary', () => {
+    const page = formatSourcePage({
+      stableId: { kind: 'arxiv', id: '2606.11111' },
+      url: 'https://arxiv.org/abs/2606.11111',
+      arxivId: '2606.11111',
+      sourceName: 'arXiv',
+      collected: new Date('2026-06-28T00:00:00Z'),
+      title: 'A Paper',
+      field: 'AI/ML',
+      topics: [],
+      cites: [],
+      summary: '## Overview\nThe paper proposes X.\n\n## Findings\nIt works.',
+    });
+    expect(page).toContain('## Summary');
+    expect(page).toContain('### Overview');
+    expect(page).toContain('### Findings');
+    // The original H2 section names must not appear at H2 level anymore.
+    expect(page).not.toContain('\n## Overview');
+    expect(page).not.toContain('\n## Findings');
   });
 });

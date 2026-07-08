@@ -5,6 +5,13 @@
  * writes and no ArticleStore status transitions. It returns semantic plans
  * that a later serial apply phase revalidates against fresh vault state before
  * mutating files/DB rows.
+ *
+ * The article's body IS its rich summary: the shared pipeline enriches,
+ * summarizes, and routes articles into this store with the summary in the
+ * snippet column and refs pre-extracted into columns. The per-user librarian
+ * performs no fetching and no summarization — it curates. (Rows that arrived
+ * outside the router — legacy backfills — degrade gracefully: their raw
+ * snippet serves as the body, and refs fall back to a regex pass over it.)
  */
 
 import { setMaxListeners } from 'events';
@@ -12,8 +19,9 @@ import { requireCtx, type Phase } from 'thread-phase';
 import { boundedFanout } from 'thread-phase/patterns';
 import type OpenAI from 'openai';
 
-import type { ArticleStore } from '../shared/article-store.js';
-import type { ArticlePlanResult, LibrarianCtx } from '../shared/librarian-types.js';
+import type { ArticleRow, ArticleStore } from '../shared/article-store.js';
+import type { ArticlePlanResult, ExtractedRefs, LibrarianCtx } from '../shared/librarian-types.js';
+import { extractArxivIds, extractDois } from '../shared/refs.js';
 import type { VaultFs } from '../tools/vault.js';
 import { stableIdForUrl, stableIdToFilename } from './page-templates.js';
 import { runRouter, type RouterRunner } from './librarian-router.js';
@@ -22,15 +30,12 @@ import { runSourceScout, type SourceScoutRunner } from './scouts/source-scout.js
 import { runEntityScout, type EntityScoutRunner } from './scouts/entity-scout.js';
 import { runCiteTracker, type CiteTrackerRunner } from './scouts/cite-tracker.js';
 import { runReviewer, type ReviewerRunner } from './reviewer.js';
-import { callSummary, type Summarizer } from './summary.js';
 
 export interface PerArticleClients {
-  /** Tool-capable model used by router + 4 scouts + reviewer. */
+  /** Tool-capable model used by router + 4 scouts + reviewer. The librarian
+   *  needs no other inference — summaries arrive pre-computed. */
   toolsClient: OpenAI;
   toolsModel: string;
-  /** Fast model for the per-article summary call. */
-  summaryClient: OpenAI;
-  summaryModel: string;
 }
 
 /** Optional DI overrides for testing. All default to the real implementations. */
@@ -41,7 +46,18 @@ export interface PerArticleDeps {
   entityScout?: EntityScoutRunner;
   citeTracker?: CiteTrackerRunner;
   reviewer?: ReviewerRunner;
-  summarizer?: Summarizer;
+}
+
+/**
+ * Refs for one article: the columns the shared router populated, falling
+ * back to a regex pass over the body for rows that predate routing.
+ */
+export function refsForArticle(article: ArticleRow, body: string): ExtractedRefs {
+  return {
+    articleId: article.id,
+    arxivIds: article.refsArxiv ?? extractArxivIds(body),
+    dois: article.refsDoi ?? extractDois(body),
+  };
 }
 
 const PER_ARTICLE_CONCURRENCY = 4;
@@ -56,11 +72,6 @@ export const planArticleTree =
     name: 'plan-article-tree',
     async *run(ctx) {
       const batch = requireCtx(ctx, 'batch', 'plan-article-tree');
-      const enriched = requireCtx(ctx, 'enriched', 'plan-article-tree');
-      const refs = requireCtx(ctx, 'refs', 'plan-article-tree');
-
-      const enrichedById = new Map(enriched.map((e) => [e.articleId, e]));
-      const refsById = new Map(refs.map((r) => [r.articleId, r]));
 
       const router = deps.router ?? runRouter;
       const topicScout = deps.topicScout ?? runTopicScout;
@@ -68,7 +79,6 @@ export const planArticleTree =
       const entityScout = deps.entityScout ?? runEntityScout;
       const citeTracker = deps.citeTracker ?? runCiteTracker;
       const reviewer = deps.reviewer ?? runReviewer;
-      const summarizer = deps.summarizer ?? callSummary;
 
       const toolsClients = { client: clients.toolsClient, model: clients.toolsModel };
 
@@ -118,12 +128,10 @@ export const planArticleTree =
             }
           };
 
-          const body = enrichedById.get(article.id)?.body ?? article.snippet ?? '';
-          const articleRefs = refsById.get(article.id) ?? {
-            articleId: article.id,
-            arxivIds: [],
-            dois: [],
-          };
+          // The rich summary from the shared pipeline (or, for legacy rows,
+          // the raw collected snippet — degraded but workable scout context).
+          const body = article.snippet ?? '';
+          const articleRefs = refsForArticle(article, body);
 
           try {
             const routerOut = await router(
@@ -175,14 +183,10 @@ export const planArticleTree =
               signal,
             );
 
-            // Summary is part of the semantic plan. Final topics/cites are NOT:
-            // the apply phase re-gates reviewer output against fresh vault state.
-            const summary = await summarizer(
-              { article, body },
-              { client: clients.summaryClient, model: clients.summaryModel },
-              signal,
-            );
-
+            // The summary in the plan is the article's pre-computed rich
+            // summary. Final topics/cites are deliberately NOT in the plan:
+            // the apply phase re-gates reviewer output against fresh vault
+            // state.
             return {
               articleId: article.id,
               outcome: 'planned',
@@ -191,8 +195,7 @@ export const planArticleTree =
                 stableId,
                 sourceFilename,
                 sourcePath,
-                body,
-                summary,
+                summary: body,
                 reviewer: reviewerOut,
               },
             };
