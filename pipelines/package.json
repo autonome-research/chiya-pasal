@@ -16,6 +16,7 @@
     "shared": "tsx src/shared-pipeline.ts",
     "doctor": "tsx src/doctor.ts",
     "status": "tsx src/status.ts",
+    "admin": "tsx src/admin.ts",
     "migrate-queue": "tsx scripts/migrate-queue.ts",
     "backfill-source-urls": "tsx scripts/backfill-source-urls.ts",
     "backfill-archive-articles": "tsx scripts/backfill-archive-articles.ts",
