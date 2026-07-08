@@ -165,3 +165,35 @@ export function loadSharedEnv(): SharedEnv {
     embed: targets.embed,
   };
 }
+
+/** One per-user pipeline target resolved for a run. handle is null only in
+ *  legacy single-tenant mode (no users.yaml). */
+export interface TenantTarget {
+  handle: string | null;
+  env: ChiyaEnv;
+}
+
+/**
+ * Resolve which tenants a per-user pipeline run covers.
+ *
+ *   - users.yaml present  → all enabled users, or just `onlyHandle` when
+ *                           given (error if unknown/disabled — a misspelled
+ *                           --user should fail loudly, not no-op).
+ *   - users.yaml absent   → legacy single-tenant target from process.env
+ *                           (VAULT_DIR / CHIYA_EMAIL_TO). Kept so dev boxes
+ *                           and the pre-cutover deployment run unchanged.
+ */
+export function resolveTenantTargets(onlyHandle?: string): TenantTarget[] {
+  let config: UsersConfig;
+  try {
+    config = loadUsersConfig();
+  } catch {
+    return [{ handle: null, env: loadChiyaEnv() }];
+  }
+  if (onlyHandle) {
+    return [{ handle: onlyHandle, env: loadChiyaEnvFor(onlyHandle, config) }];
+  }
+  return config.users
+    .filter((u) => u.enabled)
+    .map((u) => ({ handle: u.handle, env: envFromUser(u) }));
+}

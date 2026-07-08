@@ -1,7 +1,13 @@
 /**
  * Digest pipeline entry point.
  *
- * Usage: tsx src/digest.ts {AM|PM}
+ * Multi-tenant: iterates over enabled users from config/users.yaml, one
+ * sequential digest per user against that user's DB, vault, git remote, and
+ * email address, each behind its own job lock (chiya-digest:<handle>). One
+ * user's failure never blocks the others. Without users.yaml it falls back
+ * to the legacy single-tenant env.
+ *
+ * Usage: tsx src/digest.ts {AM|PM} [--user=<handle>]
  *
  * Composes phases from src/phases/digest-phases.ts, runs them through
  * thread-phase's JobRunner + SqliteJobStore so every event is persisted
@@ -16,7 +22,12 @@ import {
 import OpenAI from 'openai';
 
 import { ArticleStore } from './shared/article-store.js';
-import { loadChiyaEnv, type InferenceTarget } from './shared/env.js';
+import {
+  resolveTenantTargets,
+  type ChiyaEnv,
+  type InferenceTarget,
+  type TenantTarget,
+} from './shared/env.js';
 import { installShutdownHandlers } from './shared/shutdown.js';
 import { sweepStaleJobLock } from './shared/sweep-stale-job.js';
 import { VaultMutationLock, withVaultMutationLock } from './shared/vault-mutation-lock.js';
@@ -47,26 +58,48 @@ function todayLocal(): string {
   return `${y}-${m}-${day}`;
 }
 
-function parseDirection(): DigestDirection {
-  const arg = process.argv[2];
-  if (arg !== 'AM' && arg !== 'PM') {
-    console.error('Usage: digest.ts {AM|PM}');
+interface Args {
+  direction: DigestDirection;
+  user?: string;
+}
+
+function parseArgs(): Args {
+  const [directionArg, ...rest] = process.argv.slice(2);
+  if (directionArg !== 'AM' && directionArg !== 'PM') {
+    console.error('Usage: digest.ts {AM|PM} [--user=<handle>]');
     process.exit(2);
   }
-  return arg;
+  let user: string | undefined;
+  for (const arg of rest) {
+    const kv = /^--user=(.+)$/.exec(arg);
+    if (!kv) {
+      console.error(`unknown digest argument: ${arg}`);
+      process.exit(2);
+    }
+    user = kv[1]!;
+  }
+  return { direction: directionArg, user };
 }
 
 function clientFor(target: InferenceTarget): OpenAI {
   return new OpenAI({ baseURL: target.baseUrl, apiKey: target.apiKey });
 }
 
-async function main(): Promise<void> {
-  const direction = parseDirection();
-  const localDate = todayLocal();
-  const env = loadChiyaEnv();
+type RunStatus = 'COMPLETED' | 'FAILED' | 'SKIPPED';
+
+/** One full digest run against one tenant's env. */
+async function runForTenant(
+  label: string,
+  env: ChiyaEnv,
+  direction: DigestDirection,
+  localDate: string,
+): Promise<RunStatus> {
+  const tag = `[digest:${label}]`;
+  const dbPath = process.env.THREAD_PHASE_DB ?? `${env.vaultDir}/.chiya-pipelines.db`;
+  const lockName = env.userHandle ? `chiya-digest:${env.userHandle}` : 'chiya-digest';
 
   console.log(
-    `[digest] direction=${direction} vault=${env.vaultDir} fast=${env.fast.baseUrl}/${env.fast.model}`,
+    `${tag} direction=${direction} vault=${env.vaultDir} to=${env.emailTo} fast=${env.fast.baseUrl}/${env.fast.model}`,
   );
 
   const vault = new VaultFs(env.vaultDir);
@@ -74,8 +107,9 @@ async function main(): Promise<void> {
   const vaultMutationLock = new VaultMutationLock({ vaultDir: env.vaultDir });
   // Digest has no tool calls — everything routes through the fast client.
   const fastClient = clientFor(env.fast);
-  const dbPath = process.env.THREAD_PHASE_DB ?? `${env.vaultDir}/.chiya-pipelines.db`;
   const articleStore = new ArticleStore(dbPath);
+  const store = new SqliteJobStore(dbPath);
+  const runner = new JobRunner(store);
 
   const phases = [
     loadContext(vault),
@@ -91,9 +125,6 @@ async function main(): Promise<void> {
     emailSend(env),
   ];
 
-  const store = new SqliteJobStore(dbPath);
-  const runner = new JobRunner(store);
-
   const runController = new AbortController();
   const ctx: DigestCtx = {
     cache: new PipelineCache(),
@@ -102,56 +133,76 @@ async function main(): Promise<void> {
     signal: runController.signal,
   };
 
-  // Clear orphaned lock rows from a previous crashed run (digest systemd
-  // hard-kills at 15 min; anything older than 25 min is unambiguously dead).
-  // Without this, a single crash mid-digest leaves the lock RUNNING forever
-  // and every subsequent timer firing exits clean — the May-12 → May-17
-  // five-day digest outage was exactly that scenario.
-  const sweptLock = sweepStaleJobLock(dbPath, 'chiya-digest', 25);
-  if (sweptLock > 0) console.log(`[digest] swept ${sweptLock} stale lock row(s)`);
+  try {
+    // Clear orphaned lock rows from a previous crashed run. Without this, a
+    // single crash mid-digest leaves the lock RUNNING forever and every
+    // subsequent timer firing exits clean — the May-12 → May-17 five-day
+    // digest outage was exactly that scenario.
+    const sweptLock = sweepStaleJobLock(dbPath, lockName, 25);
+    if (sweptLock > 0) console.log(`${tag} swept ${sweptLock} stale lock row(s)`);
 
-  // acquireExclusive: prevent overlapping digest runs (e.g. an AM run that
-  // overruns into PM) from racing on git/email side effects.
-  const jobId = store.acquireExclusive('chiya-digest', { direction, date: ctx.date });
-  if (!jobId) {
-    console.log('[digest] another digest run is already in flight — exiting cleanly');
+    // acquireExclusive: prevent overlapping digest runs (e.g. an AM run that
+    // overruns into PM) from racing on git/email side effects.
+    const jobId = store.acquireExclusive(lockName, { direction, date: localDate });
+    if (!jobId) {
+      console.log(`${tag} another digest run is already in flight — skipping`);
+      return 'SKIPPED';
+    }
+
+    // Mirror events to stdout for live observation under systemd journal.
+    runner.on(`job:${jobId}`, (e: { eventType: string; data: unknown }) => {
+      console.log(`[event:${e.eventType}]`, JSON.stringify(e.data));
+    });
+
+    const disposeShutdown = installShutdownHandlers(`digest:${label}`, (signal) => {
+      if (!runController.signal.aborted) runController.abort(`received ${signal}`);
+      runner.cancel(jobId, `received ${signal}`);
+    });
+
+    try {
+      await runner.run(jobId, phases, ctx, () => ({
+        user: env.userHandle,
+        direction: ctx.direction,
+        date: ctx.date,
+        articleCount: ctx.articles?.length ?? 0,
+        highlighted: ctx.classified?.filter((c) => c.bucket !== 'skip').length ?? 0,
+        pushed: ctx.pushed,
+        emailed: ctx.emailed,
+      }));
+    } finally {
+      disposeShutdown();
+    }
+
+    const final = store.getJob(jobId);
+    console.log(`${tag} job ${jobId} → ${final?.status}`);
+    if (final?.status === 'FAILED') {
+      console.error(`${tag} error: ${final.error}`);
+      return 'FAILED';
+    }
+    return 'COMPLETED';
+  } finally {
     articleStore.close();
     store.close();
-    return;
   }
+}
 
-  // Mirror events to stdout for live observation under systemd journal.
-  runner.on(`job:${jobId}`, (e: { eventType: string; data: unknown }) => {
-    console.log(`[event:${e.eventType}]`, JSON.stringify(e.data));
-  });
+async function main(): Promise<void> {
+  const { direction, user } = parseArgs();
+  const localDate = todayLocal();
+  const targets: TenantTarget[] = resolveTenantTargets(user);
 
-  const disposeShutdown = installShutdownHandlers('digest', (signal) => {
-    if (!runController.signal.aborted) runController.abort(`received ${signal}`);
-    runner.cancel(jobId, `received ${signal}`);
-  });
-
-  try {
-    await runner.run(jobId, phases, ctx, () => ({
-      direction: ctx.direction,
-      date: ctx.date,
-      articleCount: ctx.articles?.length ?? 0,
-      highlighted: ctx.classified?.filter((c) => c.bucket !== 'skip').length ?? 0,
-      pushed: ctx.pushed,
-      emailed: ctx.emailed,
-    }));
-  } finally {
-    disposeShutdown();
+  let anyFailed = false;
+  for (const target of targets) {
+    const label = target.handle ?? 'default';
+    try {
+      const status = await runForTenant(label, target.env, direction, localDate);
+      if (status === 'FAILED') anyFailed = true;
+    } catch (err) {
+      console.error(`[digest:${label}] fatal:`, err);
+      anyFailed = true;
+    }
   }
-
-  const final = store.getJob(jobId);
-  console.log(`[digest] job ${jobId} → ${final?.status}`);
-  articleStore.close();
-  if (final?.status === 'FAILED') {
-    console.error(`[digest] error: ${final.error}`);
-    store.close();
-    process.exit(1);
-  }
-  store.close();
+  if (anyFailed) process.exit(1);
 }
 
 main().catch((err) => {
