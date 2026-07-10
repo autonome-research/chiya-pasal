@@ -7,10 +7,13 @@
 #
 # The file is gitignored because it contains user contact info.
 
-# Default cosine threshold used when a user doesn't override. 0.5 is
-# comfortably inside the empirical discrimination band for qwen3-embed-8b
-# on paragraph-length inputs (matches land 0.60-0.70, non-matches 0.30-0.35).
-default_threshold: 0.5
+# Default cosine threshold used when a user doesn't override. Deliberately
+# lenient (0.43, low side of qwen3-embed-8b's discrimination band: matches
+# land 0.60-0.70, non-matches 0.30-0.35): vault entry errs inclusive so the
+# citation graph can later reveal which admission calls were right. The
+# digest — not routing — defends the user's attention; quality junk is
+# filtered upstream by the summarize phase's gate.
+default_threshold: 0.43
 
 users:
   - handle: velvet                   # lowercase, digits, dashes; starts with a letter

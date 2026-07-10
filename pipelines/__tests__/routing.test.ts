@@ -118,11 +118,15 @@ describe('routeArticles', () => {
   });
 
   it('uses DEFAULT_THRESHOLD when none is provided', () => {
-    expect(DEFAULT_THRESHOLD).toBe(0.5);
-    // sim with [1,0,0,0] ≈ 0.451 — under the default 0.5
-    const article = [{ stableId: 'art-1', summaryVector: [0.45, 0.89, 0, 0] }];
+    // 0.43 — deliberately lenient for vault entry; see routing.ts docstring.
+    expect(DEFAULT_THRESHOLD).toBe(0.43);
+    // sim with [1,0,0,0] ≈ 0.371 — under the default 0.43
+    const article = [{ stableId: 'art-1', summaryVector: [0.37, 0.925, 0, 0] }];
     const matches = routeArticles(article, [interpUser]); // no opts
     expect(matches).toEqual([]);
+    // sim ≈ 0.451 — above the default now.
+    const near = [{ stableId: 'art-2', summaryVector: [0.45, 0.89, 0, 0] }];
+    expect(routeArticles(near, [interpUser])).toHaveLength(1);
   });
 
   it('handles empty articles or users arrays without throwing', () => {

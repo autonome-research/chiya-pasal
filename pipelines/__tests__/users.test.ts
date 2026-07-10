@@ -55,7 +55,7 @@ describe('parseUsersConfig', () => {
     expect(bob.onboarded).toBeNull();
   });
 
-  it('uses 0.5 as the default threshold when not specified', () => {
+  it('uses DEFAULT_THRESHOLD (0.43) when not specified', () => {
     const cfg = parseUsersConfig(`
 users:
   - handle: a
@@ -64,7 +64,7 @@ users:
     vault_remote: x
     interests: foo
 `);
-    expect(cfg.defaultThreshold).toBe(0.5);
+    expect(cfg.defaultThreshold).toBe(0.43);
   });
 
   it('rejects an invalid handle', () => {
