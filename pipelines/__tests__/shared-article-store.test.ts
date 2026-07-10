@@ -87,7 +87,7 @@ describe('SharedArticleStore lifecycle transitions', () => {
 
   it('markSummarized stores summary and transitions status', () => {
     store.markEnriched(baseInput.stableId, 'body', [], []);
-    store.markSummarized(baseInput.stableId, 'rich summary text');
+    store.markSummarized(baseInput.stableId, 'rich summary text', { rigor: 4, evidence: 3, kind: 'research' });
     const row = store.findByStableId(baseInput.stableId)!;
     expect(row.status).toBe('summarized');
     expect(row.summary).toBe('rich summary text');
@@ -96,7 +96,7 @@ describe('SharedArticleStore lifecycle transitions', () => {
 
   it('markEmbedded round-trips the vector via Float32 BLOB', () => {
     store.markEnriched(baseInput.stableId, 'body', [], []);
-    store.markSummarized(baseInput.stableId, 'summary');
+    store.markSummarized(baseInput.stableId, 'summary', null);
     const vec = [0.1, 0.2, 0.3, -0.4, 1.5e-3];
     store.markEmbedded(baseInput.stableId, vec);
     const row = store.findByStableId(baseInput.stableId)!;
@@ -110,7 +110,7 @@ describe('SharedArticleStore lifecycle transitions', () => {
 
   it('markRouted transitions to terminal status and stamps routed_at', () => {
     store.markEnriched(baseInput.stableId, 'body', [], []);
-    store.markSummarized(baseInput.stableId, 'summary');
+    store.markSummarized(baseInput.stableId, 'summary', null);
     store.markEmbedded(baseInput.stableId, [0]);
     store.markRouted(baseInput.stableId);
     const row = store.findByStableId(baseInput.stableId)!;

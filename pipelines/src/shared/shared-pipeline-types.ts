@@ -19,7 +19,7 @@ export interface SharedPipelineCtx extends BasePipelineContext {
   enrichCounts?: { enriched: number; enrichFailed: number; retryLater: number };
 
   // Set by shared-summarize.
-  summarizeCounts?: { summarized: number; failed: number; noText: number };
+  summarizeCounts?: { summarized: number; failed: number; noText: number; rejected: number };
 
   // Set by shared-embed.
   embeddedCount?: number;

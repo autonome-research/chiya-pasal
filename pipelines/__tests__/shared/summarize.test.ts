@@ -7,6 +7,8 @@ import type OpenAI from 'openai';
 
 import {
   callRichSummary,
+  failsQualityGate,
+  parseSummaryOutput,
   summarizeEnriched,
   type SharedSummarizer,
 } from '../../src/phases/shared/summarize.js';
@@ -69,7 +71,7 @@ describe('summarizeEnriched phase', () => {
     const ctx = makeCtx();
     await drain(summarizeEnriched(store, fakeClients(), summarizer).run(ctx));
 
-    expect(ctx.summarizeCounts).toEqual({ summarized: 2, failed: 0, noText: 0 });
+    expect(ctx.summarizeCounts).toEqual({ summarized: 2, failed: 0, noText: 0, rejected: 0 });
     expect(store.findByStableId('a1')!.status).toBe('summarized');
     expect(store.findByStableId('a1')!.summary).toBe(GOOD_SUMMARY);
     expect(store.findByStableId('a2')!.status).toBe('summarized');
@@ -82,7 +84,7 @@ describe('summarizeEnriched phase', () => {
     await drain(
       summarizeEnriched(store, fakeClients(), async () => GOOD_SUMMARY).run(ctx),
     );
-    expect(ctx.summarizeCounts).toEqual({ summarized: 0, failed: 0, noText: 1 });
+    expect(ctx.summarizeCounts).toEqual({ summarized: 0, failed: 0, noText: 1, rejected: 0 });
     const row = store.findByStableId('empty')!;
     expect(row.status).toBe('failed');
     expect(row.statusReason).toContain('no-text');
@@ -97,7 +99,7 @@ describe('summarizeEnriched phase', () => {
     };
     const ctx = makeCtx();
     await drain(summarizeEnriched(store, fakeClients(), summarizer).run(ctx));
-    expect(ctx.summarizeCounts).toEqual({ summarized: 1, failed: 1, noText: 0 });
+    expect(ctx.summarizeCounts).toEqual({ summarized: 1, failed: 1, noText: 0, rejected: 0 });
     expect(store.findByStableId('boom')!.status).toBe('failed');
     expect(store.findByStableId('boom')!.statusReason).toContain('model exploded');
   });
@@ -107,7 +109,76 @@ describe('summarizeEnriched phase', () => {
     await drain(
       summarizeEnriched(store, fakeClients(), async () => GOOD_SUMMARY).run(ctx),
     );
-    expect(ctx.summarizeCounts).toEqual({ summarized: 0, failed: 0, noText: 0 });
+    expect(ctx.summarizeCounts).toEqual({ summarized: 0, failed: 0, noText: 0, rejected: 0 });
+  });
+});
+
+const ASSESSED = (rigor: number, kind: string): string =>
+  `${GOOD_SUMMARY}\n\n## Assessment\nrigor: ${rigor}/5\nevidence: 3/5\nkind: ${kind}`;
+
+describe('parseSummaryOutput', () => {
+  it('splits summary from a well-formed assessment', () => {
+    const { summary, quality } = parseSummaryOutput(ASSESSED(4, 'research'));
+    expect(summary).toBe(GOOD_SUMMARY);
+    expect(quality).toEqual({ rigor: 4, evidence: 3, kind: 'research' });
+  });
+
+  it('returns null quality when the section is missing (fail-open)', () => {
+    const { summary, quality } = parseSummaryOutput(GOOD_SUMMARY);
+    expect(summary).toBe(GOOD_SUMMARY);
+    expect(quality).toBeNull();
+  });
+
+  it('returns null quality on malformed fields but still strips the section', () => {
+    const text = `${GOOD_SUMMARY}\n\n## Assessment\nrigor: high\nevidence: 3/5\nkind: research`;
+    const { summary, quality } = parseSummaryOutput(text);
+    expect(summary).toBe(GOOD_SUMMARY);
+    expect(quality).toBeNull();
+  });
+
+  it('rejects out-of-vocabulary kind values', () => {
+    const { quality } = parseSummaryOutput(ASSESSED(4, 'masterpiece'));
+    expect(quality).toBeNull();
+  });
+});
+
+describe('failsQualityGate', () => {
+  it('passes unassessed articles (fail-open)', () => {
+    expect(failsQualityGate(null)).toBe(false);
+  });
+  it('drops announcements and other regardless of rigor', () => {
+    expect(failsQualityGate({ rigor: 5, evidence: 5, kind: 'announcement' })).toBe(true);
+    expect(failsQualityGate({ rigor: 5, evidence: 5, kind: 'other' })).toBe(true);
+  });
+  it('drops rigor 1, passes rigor 2+ research/survey/position', () => {
+    expect(failsQualityGate({ rigor: 1, evidence: 1, kind: 'research' })).toBe(true);
+    expect(failsQualityGate({ rigor: 2, evidence: 1, kind: 'research' })).toBe(false);
+    expect(failsQualityGate({ rigor: 2, evidence: 2, kind: 'survey' })).toBe(false);
+    expect(failsQualityGate({ rigor: 3, evidence: 2, kind: 'position' })).toBe(false);
+  });
+});
+
+describe('summarizeEnriched quality gating', () => {
+  it('routes junk to rejected-quality, storing summary + assessment for tuning', async () => {
+    seed('junk', { fulltext: 'buy our new model API today' });
+    seed('good', { fulltext: 'real research text' });
+    const summarizer: SharedSummarizer = async (a) =>
+      a.stableId === 'junk' ? ASSESSED(1, 'announcement') : ASSESSED(4, 'research');
+
+    const ctx = makeCtx();
+    await drain(summarizeEnriched(store, fakeClients(), summarizer).run(ctx));
+
+    expect(ctx.summarizeCounts).toEqual({ summarized: 1, failed: 0, noText: 0, rejected: 1 });
+    const junk = store.findByStableId('junk')!;
+    expect(junk.status).toBe('rejected-quality');
+    expect(junk.statusReason).toContain('announcement');
+    expect(junk.summary).toBe(GOOD_SUMMARY); // stored for later tuning
+    expect(junk.quality).toEqual({ rigor: 1, evidence: 3, kind: 'announcement' });
+
+    const good = store.findByStableId('good')!;
+    expect(good.status).toBe('summarized');
+    expect(good.summary).toBe(GOOD_SUMMARY); // assessment stripped
+    expect(good.quality).toEqual({ rigor: 4, evidence: 3, kind: 'research' });
   });
 });
 

@@ -70,7 +70,7 @@ function seedSummarized(stableId: string, summary: string): void {
     abstract: 'abs',
   });
   store.markEnriched(stableId, 'text', ['1607.08221'], []);
-  store.markSummarized(stableId, summary);
+  store.markSummarized(stableId, summary, null);
 }
 
 describe('embedSummaries', () => {

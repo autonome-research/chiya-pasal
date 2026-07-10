@@ -16,7 +16,11 @@ import { boundedFanout } from 'thread-phase/patterns';
 import type OpenAI from 'openai';
 
 import type { SharedPipelineCtx } from '../../shared/shared-pipeline-types.js';
-import type { SharedArticleRow, SharedArticleStore } from '../../shared/shared-article-store.js';
+import type {
+  QualityAssessment,
+  SharedArticleRow,
+  SharedArticleStore,
+} from '../../shared/shared-article-store.js';
 
 const SUMMARIZE_CONCURRENCY = 4;
 const SUMMARIZE_BATCH = 20;
@@ -44,8 +48,16 @@ Write a structured summary in markdown with EXACTLY these section headings, in t
 ## Significance
 1-2 sentences: why this matters or what it changes. Omit if unclear.
 
+## Assessment
+ALWAYS include this section, last, with exactly these three lines and nothing else:
+rigor: N/5
+evidence: N/5
+kind: research|survey|position|announcement|other
+
+Scoring guide — rigor: 1 = not actual research (ad, listicle, empty shell), 3 = plausible methodology with gaps, 5 = rigorous and complete. evidence: 1 = claims without support, 3 = partial experiments/proofs, 5 = thorough validation. kind: 'research' for original work, 'survey' for reviews, 'position' for opinion/argument pieces, 'announcement' for releases/news, 'other' if none fit. Judge only from the text given; abstract-only inputs cap evidence at 3.
+
 Rules:
-- Total length 150-300 words. Concise beats complete.
+- Total length 150-300 words (excluding the Assessment section). Concise beats complete.
 - Plain prose inside each section. No bullet lists, no nested headings, no links, no citations.
 - Present tense ("the paper proposes", "the authors show").
 - Do not invent facts. If the source text is thin (e.g., abstract only), write fewer, shorter sections rather than padding.
@@ -54,6 +66,64 @@ Rules:
 export interface SummarizeClients {
   client: OpenAI;
   model: string;
+}
+
+// ---------------------------------------------------------------------------
+// Assessment parsing + the quality gate
+// ---------------------------------------------------------------------------
+
+const VALID_KINDS = new Set(['research', 'survey', 'position', 'announcement', 'other']);
+
+export interface ParsedSummary {
+  /** Summary with the ## Assessment section stripped. */
+  summary: string;
+  /** null when the section was missing or malformed — callers fail OPEN. */
+  quality: QualityAssessment | null;
+}
+
+/**
+ * Split the summarizer's output into the user-facing summary and the parsed
+ * quality assessment. Tolerant of field order and surrounding noise inside
+ * the section; strict about value shapes. A missing or malformed section
+ * yields quality=null — the pipeline treats unassessed as passing (a broken
+ * rubric must never silently starve the vaults).
+ */
+export function parseSummaryOutput(text: string): ParsedSummary {
+  const marker = /^## Assessment\s*$/m.exec(text);
+  if (!marker) return { summary: text.trim(), quality: null };
+
+  const summary = text.slice(0, marker.index).trim();
+  const section = text.slice(marker.index + marker[0].length);
+
+  const rigor = /^\s*rigor:\s*([1-5])\s*\/\s*5\s*$/m.exec(section);
+  const evidence = /^\s*evidence:\s*([1-5])\s*\/\s*5\s*$/m.exec(section);
+  const kind = /^\s*kind:\s*([a-z]+)\s*$/m.exec(section);
+
+  if (!rigor || !evidence || !kind || !VALID_KINDS.has(kind[1]!)) {
+    return { summary, quality: null };
+  }
+  return {
+    summary,
+    quality: {
+      rigor: Number(rigor[1]),
+      evidence: Number(evidence[1]),
+      kind: kind[1] as QualityAssessment['kind'],
+    },
+  };
+}
+
+/**
+ * The vault-entry quality floor. Deliberately conservative — it exists to
+ * drop clear junk (ads, releases, empty shells), not to judge weak-but-real
+ * research; the digest is where attention gets defended. Every assessment
+ * is stored either way, so this floor gets tuned from accumulated data
+ * (`SELECT quality_kind, quality_rigor, COUNT(*) ... GROUP BY`), not
+ * intuition.
+ */
+export function failsQualityGate(quality: QualityAssessment | null): boolean {
+  if (quality === null) return false; // fail-open: unassessed passes
+  if (quality.kind === 'announcement' || quality.kind === 'other') return true;
+  return quality.rigor <= 1;
 }
 
 export type SharedSummarizer = (
@@ -122,7 +192,7 @@ export const summarizeEnriched = (
     const batch = [...enriched, ...fallback];
 
     if (batch.length === 0) {
-      ctx.summarizeCounts = { summarized: 0, failed: 0, noText: 0 };
+      ctx.summarizeCounts = { summarized: 0, failed: 0, noText: 0, rejected: 0 };
       yield { type: 'phase', phase: 'shared-summarize', detail: 'nothing to summarize' };
       return;
     }
@@ -130,6 +200,7 @@ export const summarizeEnriched = (
     let summarized = 0;
     let failed = 0;
     let noText = 0;
+    let rejected = 0;
 
     const results = await boundedFanout({
       items: batch,
@@ -159,16 +230,24 @@ export const summarizeEnriched = (
         noText++;
         continue;
       }
-      store.markSummarized(article.stableId, r.value);
+      const { summary, quality } = parseSummaryOutput(r.value);
+      if (failsQualityGate(quality)) {
+        // Assessment + summary are stored anyway — the floor gets tuned from
+        // this data, and a wrongly-rejected article can be re-queued.
+        store.markRejectedQuality(article.stableId, summary, quality!);
+        rejected++;
+        continue;
+      }
+      store.markSummarized(article.stableId, summary, quality);
       summarized++;
     }
 
-    ctx.summarizeCounts = { summarized, failed, noText };
+    ctx.summarizeCounts = { summarized, failed, noText, rejected };
     yield {
       type: 'phase',
       phase: 'shared-summarize',
-      detail: `summarized=${summarized} failed=${failed} no-text=${noText}`,
-      counts: { summarized, failed, noText },
+      detail: `summarized=${summarized} rejected=${rejected} failed=${failed} no-text=${noText}`,
+      counts: { summarized, rejected, failed, noText },
     };
   },
 });

@@ -26,7 +26,18 @@ export type SharedStatus =
   | 'summarized'
   | 'embedded'
   | 'routed'
+  | 'rejected-quality'
   | 'failed';
+
+/** Quality assessment parsed from the summarizer's ## Assessment section.
+ *  null on legacy rows or when the section failed to parse (fail-open). */
+export interface QualityAssessment {
+  /** 1-5: methodology soundness — is this actual research. */
+  rigor: number;
+  /** 1-5: experiments/data/proofs present and adequate. */
+  evidence: number;
+  kind: 'research' | 'survey' | 'position' | 'announcement' | 'other';
+}
 
 export interface SharedArticleRow {
   stableId: string;
@@ -40,6 +51,7 @@ export interface SharedArticleRow {
   fulltext: string | null;
   summary: string | null;
   summaryEmbedding: number[] | null;
+  quality: QualityAssessment | null;
   refsArxiv: string[];
   refsDoi: string[];
   collectedAt: Date;
@@ -88,6 +100,9 @@ CREATE TABLE IF NOT EXISTS shared_article (
   fulltext           TEXT,
   summary            TEXT,
   summary_embedding  BLOB,
+  quality_rigor      INTEGER,
+  quality_evidence   INTEGER,
+  quality_kind       TEXT,
   refs_arxiv         TEXT NOT NULL DEFAULT '[]',
   refs_doi           TEXT NOT NULL DEFAULT '[]',
   collected_at       TEXT NOT NULL DEFAULT (datetime('now')),
@@ -127,6 +142,9 @@ interface RawRow {
   fulltext: string | null;
   summary: string | null;
   summary_embedding: Buffer | null;
+  quality_rigor: number | null;
+  quality_evidence: number | null;
+  quality_kind: string | null;
   refs_arxiv: string;
   refs_doi: string;
   collected_at: string;
@@ -170,6 +188,14 @@ function deserializeRow(r: RawRow): SharedArticleRow {
     fulltext: r.fulltext,
     summary: r.summary,
     summaryEmbedding: decodeEmbedding(r.summary_embedding),
+    quality:
+      r.quality_rigor !== null && r.quality_evidence !== null && r.quality_kind !== null
+        ? {
+            rigor: r.quality_rigor,
+            evidence: r.quality_evidence,
+            kind: r.quality_kind as QualityAssessment['kind'],
+          }
+        : null,
     refsArxiv: JSON.parse(r.refs_arxiv),
     refsDoi: JSON.parse(r.refs_doi),
     collectedAt: new Date(r.collected_at + 'Z'),
@@ -282,17 +308,45 @@ export class SharedArticleStore {
       .run(reason.slice(0, 500), stableId);
   }
 
-  markSummarized(stableId: string, summary: string): void {
+  markSummarized(stableId: string, summary: string, quality: QualityAssessment | null): void {
     this.db
       .prepare(
         `UPDATE shared_article
             SET status = 'summarized',
                 status_reason = NULL,
                 summary = ?,
+                quality_rigor = ?,
+                quality_evidence = ?,
+                quality_kind = ?,
                 summarized_at = datetime('now')
           WHERE stable_id = ?`,
       )
-      .run(summary, stableId);
+      .run(summary, quality?.rigor ?? null, quality?.evidence ?? null, quality?.kind ?? null, stableId);
+  }
+
+  /** Terminal: the quality gate dropped this article. The summary + assessment
+   *  are still stored for tuning the floor against real data later. */
+  markRejectedQuality(stableId: string, summary: string, quality: QualityAssessment): void {
+    this.db
+      .prepare(
+        `UPDATE shared_article
+            SET status = 'rejected-quality',
+                status_reason = ?,
+                summary = ?,
+                quality_rigor = ?,
+                quality_evidence = ?,
+                quality_kind = ?,
+                summarized_at = datetime('now')
+          WHERE stable_id = ?`,
+      )
+      .run(
+        `kind=${quality.kind} rigor=${quality.rigor}/5`,
+        summary,
+        quality.rigor,
+        quality.evidence,
+        quality.kind,
+        stableId,
+      );
   }
 
   markEmbedded(stableId: string, vector: number[]): void {
@@ -402,6 +456,7 @@ export class SharedArticleStore {
       summarized: 0,
       embedded: 0,
       routed: 0,
+      'rejected-quality': 0,
       failed: 0,
     };
     for (const r of rows) out[r.status] = r.n;
