@@ -205,3 +205,50 @@ describe('SharedArticleStore.listByStatus + countByStatus', () => {
     expect(counts.failed).toBe(0);
   });
 });
+
+describe('SharedArticleStore citation demand ledger', () => {
+  const entry = {
+    userHandle: 'alice',
+    refKind: 'arxiv' as const,
+    refId: '1607.08221',
+    citingStableId: 'arxiv-2606-11111',
+  };
+
+  it('records demand and aggregates by distinct citing articles', () => {
+    store.recordCitationDemand([
+      entry,
+      { ...entry, citingStableId: 'arxiv-2606-22222' },
+      { ...entry, refId: '10.1/x', refKind: 'doi', citingStableId: 'arxiv-2606-11111' },
+    ]);
+    const summary = store.citationDemandSummary({ userHandle: 'alice' });
+    expect(summary).toHaveLength(2);
+    const wanted = summary[0]!; // sorted by demand desc
+    expect(wanted.refId).toBe('1607.08221');
+    expect(wanted.demandCount).toBe(2);
+    expect(wanted.citers.sort()).toEqual(['arxiv-2606-11111', 'arxiv-2606-22222']);
+  });
+
+  it('re-recording the same pair is idempotent', () => {
+    store.recordCitationDemand([entry]);
+    store.recordCitationDemand([entry]);
+    const summary = store.citationDemandSummary({ userHandle: 'alice' });
+    expect(summary[0]!.demandCount).toBe(1);
+  });
+
+  it('minCount filters below-threshold demand (the tier-3 trigger query)', () => {
+    store.recordCitationDemand([
+      entry,
+      { ...entry, citingStableId: 'arxiv-2606-22222' },
+      { ...entry, refId: 'lonely.00001', citingStableId: 'arxiv-2606-11111' },
+    ]);
+    const hot = store.citationDemandSummary({ userHandle: 'alice', minCount: 2 });
+    expect(hot).toHaveLength(1);
+    expect(hot[0]!.refId).toBe('1607.08221');
+  });
+
+  it('demand is scoped per user', () => {
+    store.recordCitationDemand([entry, { ...entry, userHandle: 'bob' }]);
+    expect(store.citationDemandSummary({ userHandle: 'alice' })).toHaveLength(1);
+    expect(store.citationDemandSummary({ userHandle: 'bob' })).toHaveLength(1);
+  });
+});

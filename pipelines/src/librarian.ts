@@ -17,6 +17,7 @@
  * calls agents and previews apply results without mutating vault/git/rows.
  */
 
+import { existsSync } from 'fs';
 import {
   PipelineCache,
   SqliteJobStore,
@@ -25,8 +26,10 @@ import {
 import OpenAI from 'openai';
 
 import { ArticleStore } from './shared/article-store.js';
+import { SharedArticleStore } from './shared/shared-article-store.js';
 import {
   resolveTenantTargets,
+  sharedDbPath,
   type ChiyaEnv,
   type InferenceTarget,
   type TenantTarget,
@@ -43,8 +46,34 @@ import {
   commitLocal,
 } from './phases/librarian-phases.js';
 import { planArticleTree } from './phases/librarian-planner.js';
-import { applyArticlePlans } from './phases/librarian-apply.js';
+import { applyArticlePlans, type DemandRecorder } from './phases/librarian-apply.js';
 import type { LibrarianCtx } from './shared/librarian-types.js';
+
+/**
+ * Tier-2 citation demand: unresolved refs from this user's apply step land
+ * in the shared cache's ledger, keyed by handle. Only wired when the shared
+ * DB already exists — the shared pipeline owns creating it, and legacy
+ * single-tenant runs (no handle) have no ledger. The ledger is rebuildable
+ * from vault pages, so cross-layer writes here don't compromise the
+ * "layers independently reset-able" property.
+ */
+function demandRecorderFor(
+  env: ChiyaEnv,
+): { recorder?: DemandRecorder; close: () => void } {
+  const dbPath = sharedDbPath(env);
+  if (!env.userHandle || !existsSync(dbPath)) {
+    return { close: () => undefined };
+  }
+  const shared = new SharedArticleStore(dbPath);
+  const handle = env.userHandle;
+  return {
+    recorder: (entries) =>
+      shared.recordCitationDemand(
+        entries.map((e) => ({ ...e, userHandle: handle })),
+      ),
+    close: () => shared.close(),
+  };
+}
 
 interface Args {
   batchSize: number;
@@ -135,6 +164,7 @@ async function runForTenant(label: string, env: ChiyaEnv, args: Args): Promise<R
       store,
     ),
   ];
+  const demand = demandRecorderFor(env);
   const phases = planOnly
     ? planningPhases
     : dryRun
@@ -143,7 +173,11 @@ async function runForTenant(label: string, env: ChiyaEnv, args: Args): Promise<R
           ...planningPhases,
           withVaultMutationLock(
             vaultMutationLock,
-            [applyArticlePlans(vault, store), mergeMetadata(vault), commitLocal(git)],
+            [
+              applyArticlePlans(vault, store, { demandRecorder: demand.recorder }),
+              mergeMetadata(vault),
+              commitLocal(git),
+            ],
             'librarian-vault-mutation',
           ),
         ];
@@ -188,6 +222,7 @@ async function runForTenant(label: string, env: ChiyaEnv, args: Args): Promise<R
     return final?.status === 'FAILED' ? 'FAILED' : 'COMPLETED';
   } finally {
     clearTimeout(deadlineTimer);
+    demand.close();
     store.close();
     jobStore.close();
   }

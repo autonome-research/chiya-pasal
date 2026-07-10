@@ -198,3 +198,72 @@ describe('applyArticlePlans', () => {
     expect(store.getById(a.id)?.pagePaths).toEqual([plan.sourcePath]);
   });
 });
+
+describe('applyArticlePlans external references + citation demand (tiers 1-2)', () => {
+  function routedArticle(refsArxiv: string[]): ArticleRow {
+    const res = store.upsertRouted({
+      title: 'Citing paper',
+      url: 'https://arxiv.org/abs/2607.00100',
+      source: 'arXiv',
+      field: 'AI/ML',
+      summary: '## Overview\nCites things.',
+      refsArxiv,
+      refsDoi: ['10.9999/unresolved-doi'],
+      sharedStableId: 'arxiv-2607-00100',
+      routedSimilarity: 0.7,
+    });
+    store.markProcessing(res.id!);
+    return store.getById(res.id!)!;
+  }
+
+  it('renders unresolved refs, records demand, and excludes in-library + self refs', async () => {
+    // '2605.00001' will be IN the library (ingested first); '1607.08221' will not.
+    const resolved = insertArticle('Resolvable cite', 'https://arxiv.org/abs/2605.00001');
+    const ctxA = ctxWith([{ articleId: resolved.id, outcome: 'planned', plan: planned(resolved) }]);
+    await drain(applyArticlePlans(vault, store).run(ctxA));
+
+    // Citing article refs: one resolvable, one external, plus its own id (self-guard).
+    const citing = routedArticle(['2605.00001', '1607.08221', '2607.00100']);
+    const recorded: Array<{ refKind: string; refId: string; citingStableId: string }> = [];
+    const ctxB = ctxWith([{ articleId: citing.id, outcome: 'planned', plan: planned(citing) }]);
+    await drain(
+      applyArticlePlans(vault, store, { demandRecorder: (e) => recorded.push(...e) }).run(ctxB),
+    );
+
+    const page = await vault.read('wiki/sources/arxiv-2607-00100.md');
+    expect(page).toContain('## External references');
+    expect(page).toContain('- [arXiv:1607.08221](https://arxiv.org/abs/1607.08221) — not yet in library');
+    expect(page).toContain('- [doi:10.9999/unresolved-doi](https://doi.org/10.9999/unresolved-doi) — not yet in library');
+    // In-library and self refs must NOT appear as external.
+    expect(page).not.toContain('arXiv:2605.00001](');
+    expect(page).not.toContain('arXiv:2607.00100](');
+
+    expect(recorded.map((r) => r.refId).sort()).toEqual(['10.9999/unresolved-doi', '1607.08221']);
+    expect(recorded.every((r) => r.citingStableId === 'arxiv-2607-00100')).toBe(true);
+  });
+
+  it('dry-run never invokes the demand recorder', async () => {
+    const citing = routedArticle(['1607.08221']);
+    let called = false;
+    const ctx = ctxWith([{ articleId: citing.id, outcome: 'planned', plan: planned(citing) }]);
+    await drain(
+      applyArticlePlans(vault, store, {
+        dryRun: true,
+        demandRecorder: () => { called = true; },
+      }).run(ctx),
+    );
+    expect(called).toBe(false);
+  });
+
+  it('a recorder failure does not fail the article', async () => {
+    const citing = routedArticle(['1607.08221']);
+    const ctx = ctxWith([{ articleId: citing.id, outcome: 'planned', plan: planned(citing) }]);
+    await drain(
+      applyArticlePlans(vault, store, {
+        demandRecorder: () => { throw new Error('ledger unavailable'); },
+      }).run(ctx),
+    );
+    expect(ctx.results?.[0]?.outcome).toBe('done');
+    expect(store.getById(citing.id)?.status).toBe('done');
+  });
+});

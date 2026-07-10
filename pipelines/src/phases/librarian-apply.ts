@@ -23,8 +23,58 @@ import {
   appendMemberSource,
   formatSourcePage,
   formatTopicPage,
+  type ExternalRef,
 } from './page-templates.js';
 import { applyReconcileAndGate } from './reviewer.js';
+
+/** Sink for unresolved-citation demand (tier 2 of citation completion).
+ *  Wired to the shared cache's ledger by the entry point; absent in tests
+ *  and legacy single-tenant runs, where it degrades to a no-op. */
+export type DemandRecorder = (
+  entries: Array<{ refKind: 'arxiv' | 'doi'; refId: string; citingStableId: string }>,
+) => void;
+
+/** Render at most this many external refs on a source page. The demand
+ *  ledger records ALL of them; the page cap is purely readability. */
+const EXTERNAL_REFS_RENDER_CAP = 10;
+
+interface UnresolvedRefs {
+  externalRefs: ExternalRef[];
+  demand: Array<{ refKind: 'arxiv' | 'doi'; refId: string; citingStableId: string }>;
+}
+
+/**
+ * The article's refs that do NOT resolve against this user's library —
+ * re-checked at apply time (the library may have grown since planning).
+ * Self-refs (the article's own id appearing in its text) are excluded.
+ */
+function computeUnresolvedRefs(plan: PlannedArticle, store: ArticleStore): UnresolvedRefs {
+  const externalRefs: ExternalRef[] = [];
+  const demand: UnresolvedRefs['demand'] = [];
+
+  const ownArxiv = plan.stableId.kind === 'arxiv' ? plan.stableId.id.replace(/v\d+$/i, '') : null;
+  const ownDoi = plan.stableId.kind === 'doi' ? plan.stableId.doi.toLowerCase() : null;
+
+  const seen = new Set<string>();
+  for (const raw of plan.article.refsArxiv ?? []) {
+    const id = raw.trim().replace(/v\d+$/i, '');
+    if (!id || id === ownArxiv || seen.has(`a:${id}`)) continue;
+    seen.add(`a:${id}`);
+    if (store.findByArxivId(id)) continue; // resolved in-library → cite path
+    demand.push({ refKind: 'arxiv', refId: id, citingStableId: plan.sourceFilename });
+    externalRefs.push({ label: `arXiv:${id}`, url: `https://arxiv.org/abs/${id}` });
+  }
+  for (const raw of plan.article.refsDoi ?? []) {
+    const doi = raw.trim().toLowerCase();
+    if (!doi || doi === ownDoi || seen.has(`d:${doi}`)) continue;
+    seen.add(`d:${doi}`);
+    if (store.findByDoi(doi)) continue;
+    demand.push({ refKind: 'doi', refId: doi, citingStableId: plan.sourceFilename });
+    externalRefs.push({ label: `doi:${doi}`, url: `https://doi.org/${doi}` });
+  }
+
+  return { externalRefs: externalRefs.slice(0, EXTERNAL_REFS_RENDER_CAP), demand };
+}
 
 /** Per-article write log: tracks pre-state so a failed article apply can roll back. */
 function makeWriter(vault: VaultFs): {
@@ -85,6 +135,7 @@ async function applyPlannedArticle(
   plan: PlannedArticle,
   vault: VaultFs,
   store: ArticleStore,
+  recordDemand?: DemandRecorder,
 ): Promise<ArticleResult> {
   // If the source page appeared between planning and apply, do not overwrite
   // it. Treat a matching existing page as crash recovery; otherwise skip as a
@@ -186,6 +237,7 @@ async function applyPlannedArticle(
 
     // 3. Source page last: after this point a crash can be treated as a
     // completed write whose DB row may need recovery.
+    const unresolved = computeUnresolvedRefs(plan, store);
     const sourceContent = formatSourcePage({
       stableId: plan.stableId,
       url: plan.article.url ?? '',
@@ -198,9 +250,23 @@ async function applyPlannedArticle(
       topics: gated.existingTopicSlugs,
       cites: gated.citeFilenames,
       related: gated.relatedFilenames,
+      externalRefs: unresolved.externalRefs,
       summary: plan.summary,
     });
     await writer.write(plan.sourcePath, sourceContent);
+
+    // Tier-2 citation demand: after the source page is durably written, so
+    // the ledger never references a page that doesn't exist. Recording is
+    // idempotent; a recorder failure must not fail the article.
+    if (recordDemand && unresolved.demand.length > 0) {
+      try {
+        recordDemand(unresolved.demand);
+      } catch (err) {
+        console.warn(
+          `[apply] citation-demand recording failed (non-fatal): ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
 
     const allPaths = [plan.sourcePath, ...topicPagePaths, ...backlinkPagePaths];
     store.markDone(plan.article.id, allPaths);
@@ -351,6 +417,8 @@ async function previewSkippedPlan(
 export interface ApplyArticlePlansOptions {
   /** Re-run gates and report what would happen without vault/DB mutation. */
   dryRun?: boolean;
+  /** Tier-2 citation demand sink. Never invoked in dry-run mode. */
+  demandRecorder?: DemandRecorder;
 }
 
 export const applyArticlePlans = (
@@ -411,7 +479,7 @@ export const applyArticlePlans = (
 
     for (const result of plans) {
       if (result.outcome === 'planned') {
-        results.push(await applyPlannedArticle(result.plan, vault, store));
+        results.push(await applyPlannedArticle(result.plan, vault, store, options.demandRecorder));
         continue;
       }
 

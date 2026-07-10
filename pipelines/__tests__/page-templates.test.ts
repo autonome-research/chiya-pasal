@@ -534,3 +534,35 @@ describe('demoteH2 (rich summaries nested under ## Summary)', () => {
     expect(page).not.toContain('\n## Findings');
   });
 });
+
+describe('formatSourcePage external references', () => {
+  const base = {
+    stableId: { kind: 'arxiv', id: '2606.11111' } as StableId,
+    url: 'https://arxiv.org/abs/2606.11111',
+    sourceName: 'arXiv',
+    collected: new Date('2026-07-01T00:00:00Z'),
+    title: 'A Paper',
+    field: 'AI/ML',
+    topics: [],
+    cites: [],
+    summary: 'Prose summary.',
+  };
+
+  it('renders unresolved refs as annotated external links', () => {
+    const page = formatSourcePage({
+      ...base,
+      externalRefs: [
+        { label: 'arXiv:1607.08221', url: 'https://arxiv.org/abs/1607.08221' },
+        { label: 'doi:10.1/x', url: 'https://doi.org/10.1/x' },
+      ],
+    });
+    expect(page).toContain('## External references');
+    expect(page).toContain('- [arXiv:1607.08221](https://arxiv.org/abs/1607.08221) — not yet in library');
+    expect(page).toContain('- [doi:10.1/x](https://doi.org/10.1/x) — not yet in library');
+  });
+
+  it('omits the section entirely when there are none', () => {
+    const page = formatSourcePage(base);
+    expect(page).not.toContain('## External references');
+  });
+});

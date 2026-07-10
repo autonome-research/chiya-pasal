@@ -87,6 +87,28 @@ export interface RoutingLogRow extends RoutingDecision {
   decidedAt: Date;
 }
 
+/** One in-vault article citing one paper that is NOT in that user's library.
+ *  The ledger behind demand-driven ingestion (and rebuildable from the
+ *  '## External references' sections in vault source pages, so losing it
+ *  never loses data). */
+export interface CitationDemandEntry {
+  userHandle: string;
+  refKind: 'arxiv' | 'doi';
+  /** Normalized ref: bare arXiv id without version, or lowercase DOI. */
+  refId: string;
+  /** Source-page filename (without .md) of the citing article. */
+  citingStableId: string;
+}
+
+/** Aggregated demand for one missing paper within one user's vault. */
+export interface CitationDemandSummary {
+  userHandle: string;
+  refKind: 'arxiv' | 'doi';
+  refId: string;
+  demandCount: number;
+  citers: string[];
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS shared_article (
   stable_id          TEXT PRIMARY KEY,
@@ -128,6 +150,19 @@ CREATE TABLE IF NOT EXISTS routing_log (
 
 CREATE INDEX IF NOT EXISTS idx_routing_log_user
   ON routing_log(user_handle, decided_at);
+
+CREATE TABLE IF NOT EXISTS citation_demand (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_handle       TEXT NOT NULL,
+  ref_kind          TEXT NOT NULL,
+  ref_id            TEXT NOT NULL,
+  citing_stable_id  TEXT NOT NULL,
+  noted_at          TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(user_handle, ref_kind, ref_id, citing_stable_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_citation_demand_ref
+  ON citation_demand(user_handle, ref_kind, ref_id);
 `;
 
 interface RawRow {
@@ -441,6 +476,62 @@ export class SharedArticleStore {
       routed: r.routed === 1,
       viaFloor: r.via_floor === 1,
       decidedAt: new Date(r.decided_at + 'Z'),
+    }));
+  }
+
+  // ---- citation demand ledger -----------------------------------------------
+
+  /** Idempotent (UNIQUE + OR IGNORE): re-recording the same citing→cited pair
+   *  after a crash or replay is a no-op. */
+  recordCitationDemand(entries: readonly CitationDemandEntry[]): void {
+    const insert = this.db.prepare(
+      `INSERT OR IGNORE INTO citation_demand (user_handle, ref_kind, ref_id, citing_stable_id)
+       VALUES (?, ?, ?, ?)`,
+    );
+    const tx = this.db.transaction((rows: readonly CitationDemandEntry[]) => {
+      for (const e of rows) insert.run(e.userHandle, e.refKind, e.refId, e.citingStableId);
+    });
+    tx(entries);
+  }
+
+  /**
+   * Missing papers ranked by how many distinct in-vault articles cite them —
+   * the "most wanted" list that drives demand-driven ingestion (tier 3).
+   */
+  citationDemandSummary(opts: { userHandle?: string; minCount?: number; limit?: number } = {}): CitationDemandSummary[] {
+    const clauses: string[] = [];
+    const params: (string | number)[] = [];
+    if (opts.userHandle) {
+      clauses.push('user_handle = ?');
+      params.push(opts.userHandle);
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    const minCount = opts.minCount ?? 1;
+    const limit = opts.limit ?? 100;
+    const rows = this.db
+      .prepare(
+        `SELECT user_handle, ref_kind, ref_id,
+                COUNT(*) AS demand_count,
+                GROUP_CONCAT(citing_stable_id) AS citers
+           FROM citation_demand ${where}
+          GROUP BY user_handle, ref_kind, ref_id
+         HAVING COUNT(*) >= ?
+          ORDER BY demand_count DESC, ref_id ASC
+          LIMIT ?`,
+      )
+      .all(...params, minCount, limit) as Array<{
+        user_handle: string;
+        ref_kind: 'arxiv' | 'doi';
+        ref_id: string;
+        demand_count: number;
+        citers: string;
+      }>;
+    return rows.map((r) => ({
+      userHandle: r.user_handle,
+      refKind: r.ref_kind,
+      refId: r.ref_id,
+      demandCount: r.demand_count,
+      citers: r.citers.split(','),
     }));
   }
 

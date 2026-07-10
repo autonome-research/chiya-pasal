@@ -14,6 +14,15 @@ export type StableId =
   | { kind: 'doi'; doi: string }
   | { kind: 'url'; hash: string };
 
+/** A reference the article cites that is NOT in this library — rendered as
+ *  an external link so the citation information stays visible, and recorded
+ *  in the shared demand ledger for demand-driven ingestion. */
+export interface ExternalRef {
+  /** Display label, e.g. 'arXiv:2605.03823' or 'doi:10.1038/xyz'. */
+  label: string;
+  url: string;
+}
+
 export interface SourcePageInput {
   stableId: StableId;
   url: string;
@@ -27,6 +36,8 @@ export interface SourcePageInput {
   cites: string[];
   /** Existing source filenames (without wiki/sources/ and .md) related to this source. */
   related?: string[];
+  /** Cited references not (yet) in the library. Omitted section when empty. */
+  externalRefs?: ExternalRef[];
   summary: string;
 }
 
@@ -178,6 +189,13 @@ export function formatSourcePage(input: SourcePageInput): string {
     body.push('_None resolved against the current library._');
   } else {
     for (const c of input.cites) body.push(`- [[wiki/sources/${c}]]`);
+  }
+  const externalRefs = input.externalRefs ?? [];
+  if (externalRefs.length > 0) {
+    body.push('', '## External references', '');
+    for (const r of externalRefs) {
+      body.push(`- [${r.label}](${r.url}) — not yet in library`);
+    }
   }
   body.push('', '## Related sources', '');
   if (related.length === 0) {
