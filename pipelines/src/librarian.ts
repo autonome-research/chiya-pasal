@@ -35,7 +35,9 @@ import {
   type TenantTarget,
 } from './shared/env.js';
 import { installShutdownHandlers } from './shared/shutdown.js';
-import { sweepStaleJobLock } from './shared/sweep-stale-job.js';
+/** Reclaim RUNNING jobs whose owner has been silent this long. Heartbeats
+ *  fire every 30s, so 5 minutes of silence means the process is gone. */
+const STALE_HEARTBEAT_MS = 5 * 60 * 1000;
 import { VaultMutationLock, withVaultMutationLock } from './shared/vault-mutation-lock.js';
 import { GitOps } from './tools/git.js';
 import { VaultFs } from './tools/vault.js';
@@ -137,7 +139,11 @@ async function runForTenant(label: string, env: ChiyaEnv, args: Args): Promise<R
   });
   const store = new ArticleStore(dbPath);
   const jobStore = new SqliteJobStore(dbPath);
-  const runner = new JobRunner(jobStore);
+  // Heartbeat every 30s; reconcileAbandoned below treats anything quiet for
+  // 5 minutes as a dead owner. Replaces the old wall-clock sweepStaleJobLock:
+  // a legitimately long run stays alive via heartbeats, a crashed one is
+  // reclaimed within minutes instead of a 30-minute guess window.
+  const runner = new JobRunner(jobStore, { heartbeatMs: 30_000 });
   const vaultMutationLock = new VaultMutationLock({ vaultDir: env.vaultDir });
 
   const deadlineController = new AbortController();
@@ -183,12 +189,11 @@ async function runForTenant(label: string, env: ChiyaEnv, args: Args): Promise<R
         ];
 
   try {
-    // Clear orphaned lock rows from a previous crashed run (systemd hard-kills
-    // well before this; anything older than 30 min is unambiguously dead).
-    const swept = sweepStaleJobLock(dbPath, lockName, 30);
-    if (swept > 0) console.log(`${tag} swept ${swept} stale lock row(s)`);
+    // Reclaim jobs whose owner stopped heartbeating (crash, hard-kill).
+    const reclaimed = await runner.reconcileAbandoned(STALE_HEARTBEAT_MS);
+    if (reclaimed.length > 0) console.log(`${tag} reclaimed ${reclaimed.length} abandoned job(s)`);
 
-    const jobId = jobStore.acquireExclusive(lockName, { batchSize, minutes, dryRun, planOnly });
+    const jobId = await jobStore.acquireExclusive(lockName, { batchSize, minutes, dryRun, planOnly });
     if (!jobId) {
       console.log(`${tag} another run already in flight — skipping`);
       return 'SKIPPED';
@@ -216,7 +221,7 @@ async function runForTenant(label: string, env: ChiyaEnv, args: Args): Promise<R
       disposeShutdown();
     }
 
-    const final = jobStore.getJob(jobId);
+    const final = await jobStore.getJob(jobId);
     console.log(`${tag} job ${jobId} → ${final?.status}`);
     console.log(`${tag} table state:`, store.countByStatus());
     return final?.status === 'FAILED' ? 'FAILED' : 'COMPLETED';

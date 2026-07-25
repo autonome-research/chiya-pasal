@@ -26,7 +26,7 @@
   "dependencies": {
     "better-sqlite3": "^11.5.0",
     "glob": "^11.0.0",
-    "thread-phase": "github:Code4me2/thread-phase#88b16b0e02f06c672c5ebdb3379a31d2ae97cff0",
+    "thread-phase": "npm:@autonome-research/thread-phase@^6.1.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

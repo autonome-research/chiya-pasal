@@ -29,7 +29,9 @@ import {
   type TenantTarget,
 } from './shared/env.js';
 import { installShutdownHandlers } from './shared/shutdown.js';
-import { sweepStaleJobLock } from './shared/sweep-stale-job.js';
+/** Reclaim RUNNING jobs whose owner has been silent this long. Heartbeats
+ *  fire every 30s, so 5 minutes of silence means the process is gone. */
+const STALE_HEARTBEAT_MS = 5 * 60 * 1000;
 import { VaultMutationLock, withVaultMutationLock } from './shared/vault-mutation-lock.js';
 import { GitOps } from './tools/git.js';
 import { VaultFs } from './tools/vault.js';
@@ -109,7 +111,7 @@ async function runForTenant(
   const fastClient = clientFor(env.fast);
   const articleStore = new ArticleStore(dbPath);
   const store = new SqliteJobStore(dbPath);
-  const runner = new JobRunner(store);
+  const runner = new JobRunner(store, { heartbeatMs: 30_000 });
 
   const phases = [
     loadContext(vault),
@@ -134,16 +136,16 @@ async function runForTenant(
   };
 
   try {
-    // Clear orphaned lock rows from a previous crashed run. Without this, a
-    // single crash mid-digest leaves the lock RUNNING forever and every
-    // subsequent timer firing exits clean — the May-12 → May-17 five-day
-    // digest outage was exactly that scenario.
-    const sweptLock = sweepStaleJobLock(dbPath, lockName, 25);
-    if (sweptLock > 0) console.log(`${tag} swept ${sweptLock} stale lock row(s)`);
+    // Reclaim jobs whose owner stopped heartbeating. Without this, a single
+    // crash mid-digest leaves the lock RUNNING forever and every subsequent
+    // timer firing exits clean — the May-12 → May-17 five-day digest outage
+    // was exactly that scenario (then wall-clock-swept; now heartbeat-based).
+    const reclaimed = await runner.reconcileAbandoned(STALE_HEARTBEAT_MS);
+    if (reclaimed.length > 0) console.log(`${tag} reclaimed ${reclaimed.length} abandoned job(s)`);
 
     // acquireExclusive: prevent overlapping digest runs (e.g. an AM run that
     // overruns into PM) from racing on git/email side effects.
-    const jobId = store.acquireExclusive(lockName, { direction, date: localDate });
+    const jobId = await store.acquireExclusive(lockName, { direction, date: localDate });
     if (!jobId) {
       console.log(`${tag} another digest run is already in flight — skipping`);
       return 'SKIPPED';
@@ -173,7 +175,7 @@ async function runForTenant(
       disposeShutdown();
     }
 
-    const final = store.getJob(jobId);
+    const final = await store.getJob(jobId);
     console.log(`${tag} job ${jobId} → ${final?.status}`);
     if (final?.status === 'FAILED') {
       console.error(`${tag} error: ${final.error}`);

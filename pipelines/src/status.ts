@@ -41,13 +41,13 @@ export interface StatusSnapshot {
   jobs: Array<{ id: string; name: string; status: string; createdAt: Date; completedAt: Date | null; eventCount: number }>;
 }
 
-export function loadStatus(options: StatusOptions, env = statusEnv()): StatusSnapshot {
+export async function loadStatus(options: StatusOptions, env = statusEnv()): Promise<StatusSnapshot> {
   const store = new ArticleStore(env.dbPath);
   const jobStore = new SqliteJobStore(env.dbPath);
   try {
     const articles = store.countByStatus();
     const jobs = options.jobs > 0
-      ? jobStore.listJobs({ limit: options.jobs }).map((j) => ({
+      ? (await jobStore.listJobs({ limit: options.jobs })).map((j) => ({
           id: j.id,
           name: j.name,
           status: j.status,
@@ -84,7 +84,7 @@ export function formatStatus(snapshot: StatusSnapshot): string {
 
 async function main(): Promise<void> {
   const options = parseArgs();
-  console.log(formatStatus(loadStatus(options)));
+  console.log(formatStatus(await loadStatus(options)));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

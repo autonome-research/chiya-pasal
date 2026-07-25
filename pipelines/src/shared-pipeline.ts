@@ -30,7 +30,9 @@ import { SharedArticleStore } from './shared/shared-article-store.js';
 import { ArticleStore } from './shared/article-store.js';
 import { loadUsersConfig, listEnabledUsers, type User } from './shared/users.js';
 import { installShutdownHandlers } from './shared/shutdown.js';
-import { sweepStaleJobLock } from './shared/sweep-stale-job.js';
+/** Reclaim RUNNING jobs whose owner has been silent this long. Heartbeats
+ *  fire every 30s, so 5 minutes of silence means the process is gone. */
+const STALE_HEARTBEAT_MS = 5 * 60 * 1000;
 import type { SharedPipelineCtx } from './shared/shared-pipeline-types.js';
 import { VaultFs } from './tools/vault.js';
 import { scanSharedInbox, absorbInbox } from './phases/shared/absorb.js';
@@ -82,7 +84,7 @@ async function main(): Promise<void> {
   const inboxFs = new VaultFs(env.inboxDir);
   const store = new SharedArticleStore(env.sharedDb);
   const jobStore = new SqliteJobStore(env.sharedDb);
-  const runner = new JobRunner(jobStore);
+  const runner = new JobRunner(jobStore, { heartbeatMs: 30_000 });
 
   const deadlineController = new AbortController();
   const deadlineTimer = setTimeout(
@@ -112,12 +114,11 @@ async function main(): Promise<void> {
     routeEmbedded(store, users, env.embed, { openUserStore }),
   ];
 
-  // Clear orphaned lock rows from a previous crashed run (systemd hard-kills
-  // at 30 min; anything older than 40 min is unambiguously dead).
-  const swept = sweepStaleJobLock(env.sharedDb, 'chiya-shared', 40);
-  if (swept > 0) console.log(`[shared] swept ${swept} stale lock row(s)`);
+  // Reclaim jobs whose owner stopped heartbeating (crash, hard-kill).
+  const reclaimed = await runner.reconcileAbandoned(STALE_HEARTBEAT_MS);
+  if (reclaimed.length > 0) console.log(`[shared] reclaimed ${reclaimed.length} abandoned job(s)`);
 
-  const jobId = jobStore.acquireExclusive('chiya-shared', { minutes, users: users.length });
+  const jobId = await jobStore.acquireExclusive('chiya-shared', { minutes, users: users.length });
   if (!jobId) {
     console.log('[shared] another run already in flight — exiting cleanly');
     clearTimeout(deadlineTimer);
@@ -148,7 +149,7 @@ async function main(): Promise<void> {
     clearTimeout(deadlineTimer);
   }
 
-  const final = jobStore.getJob(jobId);
+  const final = await jobStore.getJob(jobId);
   console.log(`[shared] job ${jobId} → ${final?.status}`);
   console.log('[shared] cache state:', store.countByStatus());
 

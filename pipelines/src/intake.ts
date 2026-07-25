@@ -36,11 +36,11 @@ async function main(): Promise<void> {
   const vault = new VaultFs(env.vaultDir);
   const store = new ArticleStore(dbPath);
   const jobStore = new SqliteJobStore(dbPath);
-  const runner = new JobRunner(jobStore);
+  const runner = new JobRunner(jobStore, { heartbeatMs: 30_000 });
 
   const phases = [scanInbox(vault), parseAndStore(vault, store), archiveInboxFiles(vault)];
 
-  const jobId = runner.create('chiya-intake', {});
+  const jobId = await runner.create('chiya-intake', {});
   runner.on(`job:${jobId}`, (e: { eventType: string; data: unknown }) =>
     console.log(`[event:${e.eventType}]`, JSON.stringify(e.data)),
   );
@@ -61,7 +61,7 @@ async function main(): Promise<void> {
     disposeShutdown();
   }
 
-  const final = jobStore.getJob(jobId);
+  const final = await jobStore.getJob(jobId);
   console.log(`[intake] job ${jobId} → ${final?.status}`);
   console.log('[intake] table state:', store.countByStatus());
 
