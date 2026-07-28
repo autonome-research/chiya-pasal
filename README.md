@@ -8,32 +8,44 @@ Chiya (茶) — "tea" — a curated serving of research intelligence, delivered 
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Collection                                                  │
+│  Collection (runs once, all users)                           │
 │                                                              │
 │  Linux cron (every 4h) → matcha/scripts/collect.sh           │
 │    ├── TS API ingest     → source adapters (Semantic Scholar,│
 │    │                       OpenAlex, CrossRef, arXiv, legacy │
 │    │                       academic APIs)                    │
 │    ├── matcha binary     → ~30 RSS feeds                     │
-│    └── filter_matcha.py  → dedup → vault/raw/inbox/*.md      │
+│    └── filter_matcha.py  → dedup → chiya-data/shared inbox   │
 └──────────────────────────────────────────────────────────────┘
                             │
 ┌──────────────────────────────────────────────────────────────┐
-│  Pipelines (TypeScript on thread-phase, systemd user timers) │
+│  SHARED pipeline (every 30 min — once per article, not user) │
+│    absorb inbox → shared cache (stable IDs, dedup)           │
+│    enrich: arXiv HTML → direct → Unpaywall OA (pdftotext)    │
+│    summarize: rich structured summary + quality assessment   │
+│    route: embedding cosine-match OR broadcast (current mode) │
+│      └── COPY into each matched user's ArticleStore          │
+└──────────────────────────────────────────────────────────────┘
+                            │  per enabled user in users.yaml
+┌──────────────────────────────────────────────────────────────┐
+│  PER-USER pipelines (multi-tenant, isolated per user)        │
 │                                                              │
-│  intake.timer       (HH:03, every 4h)                        │
-│    └── scan raw/inbox/ → ArticleStore (pending) → archive    │
-│                                                              │
-│  librarian.timer    (every 10 min, drain mode)               │
+│  librarian.timer    (every 10 min)                           │
 │    └── per article: router → 4 scouts → reviewer → plan      │
-│         then serial apply emits source/topic/cite pages       │
+│         then serial apply emits source/topic/cite pages      │
+│         into THAT USER's vault                               │
 │                                                              │
 │  digest@.service    (06:30 + 18:30, AM/PM)                   │
 │    └── load → prioritize → draft → commit → push → email     │
+│         to THAT USER's address                               │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Two SQLite tables anchor the flow: `article` (status FSM: pending → processing → done/skipped/failed) and `job` (thread-phase's persisted run log). Both live in `<vault>/.chiya-pipelines.db`.
+State anchors: the shared cache (`~/chiya-data/shared/articles.db` —
+article lifecycle FSM, routing telemetry, citation-demand ledger) and one
+`article` + `job` SQLite pair per user (`~/chiya-data/users/<handle>/vault/.chiya-pipelines.db`).
+Tenants are registered in `pipelines/config/users.yaml` and managed with
+`npm run admin -- users <list|show|add|pause|resume|remove>`.
 
 ## Repository Structure
 
@@ -121,10 +133,10 @@ cd pipelines && npm run doctor -- --no-network
 | Layer | Trigger | Frequency |
 |---|---|---|
 | matcha collect | Linux cron | every 4h at HH:00 |
-| intake | systemd timer | HH:03 (3 min behind matcha) |
-| librarian | systemd timer | every 10 min (drain mode); switch to 30 min once backlog clears |
-| digest AM | systemd timer | 06:30 local |
-| digest PM | systemd timer | 18:30 local |
+| shared pipeline | systemd timer | every 30 min at :07/:37 |
+| librarian (per user) | systemd timer | every 10 min |
+| digest AM (per user) | systemd timer | 06:30 local |
+| digest PM (per user) | systemd timer | 18:30 local |
 
 The digest commits and pushes the vault on every successful run. All steady-state timers have `Persistent=true` so a single missed cycle catches up at the next tick.
 

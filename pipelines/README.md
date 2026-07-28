@@ -1,16 +1,22 @@
 # chiya-pipelines
 
-Curation pipelines for the Chiya Library — TypeScript on [`thread-phase`](https://github.com/Code4me2/thread-phase). Three composable typed pipelines (intake / librarian / digest) running as plain Node processes under systemd user timers.
+Curation pipelines for the Chiya Library — TypeScript on
+[`thread-phase`](https://github.com/autonome-research/thread-phase) v6
+(owned, heartbeat-based job lifecycle). Multi-tenant: one SHARED pipeline
+does the expensive per-article work once (absorb → enrich → summarize →
+route); per-user librarian and digest pipelines iterate over enabled
+tenants from `config/users.yaml`.
 
 ## Status
 
 | Pipeline | State | Cadence |
 |---|---|---|
-| `intake` | live | every 4h at HH:03 |
-| `librarian` | live (v3 router → scouts → reviewer flow) | every 10 min (drain mode); switch to 30 min once `pending` clears |
-| `digest` | live | 06:30 / 18:30 local |
+| `shared` | live (routing mode: broadcast until the embedding service returns) | every 30 min |
+| `librarian` | live, multi-tenant (router → scouts → reviewer → serial apply per user) | every 10 min |
+| `digest` | live, multi-tenant | 06:30 / 18:30 local |
+| `intake` | retired — absorbed into the shared pipeline | — |
 
-373 tests, all green. `npm test`, `npm run build`.
+511 tests, all green. `npm test`, `npm run build`.
 
 ## Setup
 
@@ -38,6 +44,12 @@ npm run build
 | `CHIYA_FAST_MAX_TOKENS` | `4000` | Output-token cap for fast-tier digest classify/draft calls. Raised for reasoning models that otherwise spend the full cap on hidden reasoning and return `finishReason: length`. |
 | `CHIYA_SOURCE_TIMEOUT_MS` | `15000` | Per-request timeout for TypeScript API source adapters |
 | `CHIYA_SOURCE_RETRIES` | `1` | Retry count for retryable source HTTP failures (`408`, `429`, `5xx`) |
+| `CHIYA_DATA_ROOT` | `~/chiya-data` | Multi-tenant layout root: `shared/` cache + `users/<handle>/vault` |
+| `CHIYA_USERS_FILE` | `config/users.yaml` | Tenant registry (managed via `npm run admin`) |
+| `CHIYA_SHARED_INBOX` | `<dataRoot>/shared/inbox` | Where matcha's `*-articles.md` land (live deploy uses `<dataRoot>/shared/raw/inbox` — matcha's collect.sh writes `$VAULT_DIR/raw/inbox`) |
+| `CHIYA_UNPAYWALL_EMAIL` | unset | Contact email for Unpaywall OA lookups; the OA enrichment rung is skipped without it |
+| `CHIYA_ROUTING_MODE` | `embedding` | `broadcast` = every quality-passing article to every user, no embeddings (current live mode) |
+| `EMBED_INFERENCE_BASE_URL` | `http://localhost:11437/v1` | Embeddings endpoint (unused in broadcast mode) |
 
 The default `localhost:11435` is the SSH tunnel installed via `chiya-tunnel-tiny.service` (forwards to tiny-emerson:9000 — the raw vllm. NOT :8000, which is a PI/Hermes wrapper whose chat template hardcodes its own tool surface and breaks scout tool calls).
 

@@ -35,37 +35,43 @@ Do not move side effects into prompts or agent-controlled tool calls unless ther
 ## Current architecture in one page
 
 ```text
-Collection
+Collection (once, all users)
   matcha/scripts/collect.sh
     → TypeScript API source adapters
     → RSS via matcha
     → filter_matcha.py
-    → vault/raw/inbox/*.md
+    → chiya-data shared inbox *.md
 
-Intake
-  raw inbox markdown
-    → ArticleStore SQLite rows
-    → pending queue
+Shared pipeline (once per article, not per user)
+  absorb inbox → SharedArticleStore (stable IDs, dedup, query labels)
+    → enrich (arXiv HTML → direct URL → Unpaywall OA; pdftotext for PDFs)
+    → summarize (rich structured summary + quality assessment/gate)
+    → route (embedding cosine-match, or broadcast while embeddings are down)
+    → COPY into each matched user's ArticleStore
 
-Librarian
-  pending articles
+Librarian (per enabled user in config/users.yaml)
+  that user's pending articles
     → router
-    → topic/source/entity/citation scouts
+    → topic/source/entity/citation scouts   (explore THAT USER's vault)
     → reviewer
     → semantic article plans
     → serial deterministic apply
     → wiki/sources, wiki/topics, wiki/entities backlinks
+    → unresolved cites → External references + shared demand ledger
 
-Digest
-  ArticleStore + vault context
+Digest (per enabled user)
+  that user's ArticleStore + vault context
     → classify
     → draft sections
     → append log
     → commit/squash/push
-    → email
+    → email that user
 ```
 
-The vault itself is a separate git repo, usually `~/vault`. The pipeline database is usually `<vault>/.chiya-pipelines.db`.
+Each user's vault is its own git repo at `~/chiya-data/users/<handle>/vault`
+with its pipeline DB inside it; the shared layer's cache + job log live at
+`~/chiya-data/shared/articles.db`. Tenants are registered in
+`pipelines/config/users.yaml` (managed via `npm run admin`).
 
 ## Canonical live format decisions
 
