@@ -4,7 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { PipelineCache } from 'thread-phase';
 
-import { embedSummaries, routeEmbedded } from '../../src/phases/shared/route.js';
+import { embedSummaries, routeBroadcast, routeEmbedded } from '../../src/phases/shared/route.js';
 import { SharedArticleStore } from '../../src/shared/shared-article-store.js';
 import { ArticleStore } from '../../src/shared/article-store.js';
 import type { SharedPipelineCtx } from '../../src/shared/shared-pipeline-types.js';
@@ -226,5 +226,73 @@ describe('routeEmbedded', () => {
     expect(ctx.routeCounts).toEqual({ articles: 0, matches: 0, copied: 0, duplicates: 0 });
     // Articles stay embedded (not routed) so a later cycle with users picks them up.
     expect(store.findByStableId('a1')!.status).toBe('embedded');
+  });
+});
+
+describe('routeBroadcast (embeddings-down mode)', () => {
+  function userStoreFactory(): { factory: (handle: string) => ArticleStore; paths: Map<string, string> } {
+    const paths = new Map<string, string>();
+    return {
+      paths,
+      factory: (handle: string) => {
+        const userDir = join(dir, 'users', handle);
+        mkdirSync(userDir, { recursive: true });
+        const p = join(userDir, 'articles.db');
+        paths.set(handle, p);
+        return new ArticleStore(p);
+      },
+    };
+  }
+
+  it('copies every summarized article to every enabled user with null similarity', async () => {
+    seedSummarized('a1', 'summary one');
+    seedSummarized('a2', 'summary two');
+    const users = [makeUser({}), makeUser({ handle: 'bob', emailTo: 'b@x.com' })];
+    const { factory, paths } = userStoreFactory();
+
+    const ctx = makeCtx();
+    await drain(routeBroadcast(store, users, { openUserStore: factory }).run(ctx));
+
+    expect(ctx.routeCounts).toEqual({ articles: 2, matches: 4, copied: 4, duplicates: 0 });
+    expect(store.findByStableId('a1')!.status).toBe('routed'); // skipped 'embedded' entirely
+    expect(store.findByStableId('a2')!.status).toBe('routed');
+
+    for (const handle of ['alice', 'bob']) {
+      const s = new ArticleStore(paths.get(handle)!);
+      const rows = s.listPending(10);
+      s.close();
+      expect(rows).toHaveLength(2);
+      expect(rows.every((r) => r.routedSimilarity === null)).toBe(true);
+      expect(rows.every((r) => r.collectedFrom === 'shared-router')).toBe(true);
+      expect(rows.every((r) => r.sharedStableId !== null)).toBe(true);
+    }
+  });
+
+  it('writes no routing_log rows (broadcast carries no tuning signal)', async () => {
+    seedSummarized('a1', 'summary one');
+    const { factory } = userStoreFactory();
+    await drain(routeBroadcast(store, [makeUser({})], { openUserStore: factory }).run(makeCtx()));
+    expect(store.routingSimilarities()).toHaveLength(0);
+  });
+
+  it('replaying after a crash dedups cleanly', async () => {
+    seedSummarized('a1', 'summary one');
+    const { factory, paths } = userStoreFactory();
+    const deps = { openUserStore: factory };
+    await drain(routeBroadcast(store, [makeUser({})], deps).run(makeCtx()));
+    // Second article arrives; first is already in alice's store.
+    seedSummarized('a2', 'summary two');
+    const ctx = makeCtx();
+    await drain(routeBroadcast(store, [makeUser({})], deps).run(ctx));
+    const s = new ArticleStore(paths.get('alice')!);
+    expect(s.listPending(10)).toHaveLength(2);
+    s.close();
+  });
+
+  it('no users → articles hold at summarized for a later cycle', async () => {
+    seedSummarized('a1', 'summary one');
+    const ctx = makeCtx();
+    await drain(routeBroadcast(store, [], { openUserStore: () => { throw new Error('none'); } }).run(ctx));
+    expect(store.findByStableId('a1')!.status).toBe('summarized');
   });
 });

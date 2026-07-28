@@ -71,7 +71,8 @@ export interface RoutedArticleInput {
   refsArxiv: string[];
   refsDoi: string[];
   sharedStableId: string;
-  routedSimilarity: number;
+  /** Cosine at routing time; null in broadcast mode (no embeddings). */
+  routedSimilarity: number | null;
   collectedAt?: Date;
 }
 

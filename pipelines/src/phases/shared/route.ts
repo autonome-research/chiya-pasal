@@ -1,21 +1,29 @@
 /**
- * Shared embed + route phases.
+ * Shared routing phases — two modes (selected in shared-pipeline.ts from
+ * CHIYA_ROUTING_MODE):
  *
- * embedSummaries: batch-embed newly summarized articles ('summarized' →
- * 'embedded'). User interest paragraphs are embedded fresh in the routing
- * phase — 5 users × 3 paragraphs is one cheap batch call; caching them
- * would add invalidation complexity for no measurable win.
+ * embedding mode (embedSummaries + routeEmbedded):
+ *   - embedSummaries: batch-embed newly summarized articles ('summarized' →
+ *     'embedded'). User interest paragraphs are embedded fresh in the
+ *     routing phase — a handful of users × a few paragraphs is one cheap
+ *     batch call; caching them would add invalidation complexity for no
+ *     measurable win.
+ *   - routeEmbedded: score every 'embedded' article against every enabled
+ *     user (max-over-interest-vectors cosine), COPY matches into each
+ *     user's per-user ArticleStore (self-contained per-user layer — the
+ *     shared cache stays independently prunable), persist the full score
+ *     matrix for threshold tuning, then mark articles 'routed'.
  *
- * routeEmbedded: score every 'embedded' article against every enabled
- * user (max-over-interest-vectors cosine), COPY matches into each user's
- * per-user ArticleStore (self-contained per-user layer — the shared cache
- * stays independently prunable), persist the full score matrix for
- * threshold tuning, then mark articles 'routed'.
+ * broadcast mode (routeBroadcast):
+ *   - every quality-passing article goes to every enabled user, straight
+ *     from 'summarized' to 'routed' (no embeddings, no scores). The
+ *     degraded-but-useful mode while the embedding service is down. No
+ *     routing_log rows are written — the log measures embedding-admission
+ *     quality, and broadcast decisions carry no signal worth tuning on.
  *
- * Split into two phases so a crash between them resumes cleanly from the
- * FSM: 'summarized' rows re-embed, 'embedded' rows re-route. Both
- * operations are idempotent (embedding is deterministic; upsertRouted
- * dedups by url/title).
+ * Both copy paths are idempotent (upsertRouted dedups by url/title), so a
+ * crash mid-phase replays cleanly, and switching modes later requires no
+ * migration: 'summarized' rows simply take whichever path is active.
  */
 
 import type { Phase } from 'thread-phase';
@@ -33,6 +41,28 @@ import type { User } from '../../shared/users.js';
 
 const EMBED_BATCH = 64;
 const ROUTE_BATCH = 200;
+
+/** Copy one shared-cache article into one user's store. Shared by both
+ *  routing modes so provenance fields stay consistent. */
+function copyToUser(
+  userStore: ArticleStore,
+  article: SharedArticleRow,
+  similarity: number | null,
+): 'inserted' | 'duplicate' {
+  const r = userStore.upsertRouted({
+    title: article.title,
+    url: article.url,
+    source: article.source,
+    field: article.field,
+    summary: article.summary ?? '',
+    refsArxiv: article.refsArxiv,
+    refsDoi: article.refsDoi,
+    sharedStableId: article.stableId,
+    routedSimilarity: similarity,
+    collectedAt: article.collectedAt,
+  });
+  return r.result === 'inserted' ? 'inserted' : 'duplicate';
+}
 
 export const embedSummaries = (
   store: SharedArticleStore,
@@ -130,19 +160,7 @@ export const routeEmbedded = (
         userStore = deps.openUserStore(m.userHandle);
         stores.set(m.userHandle, userStore);
       }
-      const r = userStore.upsertRouted({
-        title: article.title,
-        url: article.url,
-        source: article.source,
-        field: article.field,
-        summary: article.summary ?? '',
-        refsArxiv: article.refsArxiv,
-        refsDoi: article.refsDoi,
-        sharedStableId: article.stableId,
-        routedSimilarity: m.similarity,
-        collectedAt: article.collectedAt,
-      });
-      if (r.result === 'inserted') copied++;
+      if (copyToUser(userStore, article, m.similarity) === 'inserted') copied++;
       else duplicates++;
     }
     for (const s of stores.values()) s.close();
@@ -155,6 +173,65 @@ export const routeEmbedded = (
       type: 'phase',
       phase: 'shared-route',
       detail: `${batch.length} articles → ${matches.length} matches (${copied} copied, ${duplicates} dup)`,
+      counts: ctx.routeCounts,
+    };
+  },
+});
+
+/**
+ * Broadcast routing: every 'summarized' article is copied to EVERY enabled
+ * user, then marked 'routed' (the 'embedded' stage is skipped entirely).
+ * Used while the embedding service is down — see the module docstring.
+ */
+export const routeBroadcast = (
+  store: SharedArticleStore,
+  users: readonly User[],
+  deps: { openUserStore: UserStoreFactory },
+): Phase<SharedPipelineCtx> => ({
+  name: 'shared-route-broadcast',
+  async *run(ctx) {
+    const batch = store.listByStatus('summarized', ROUTE_BATCH);
+    if (batch.length === 0 || users.length === 0) {
+      ctx.routeCounts = { articles: 0, matches: 0, copied: 0, duplicates: 0 };
+      yield {
+        type: 'phase',
+        phase: 'shared-route-broadcast',
+        detail: batch.length === 0 ? 'nothing to route' : 'no enabled users',
+      };
+      return;
+    }
+
+    const stores = new Map<string, ArticleStore>();
+    let copied = 0;
+    let duplicates = 0;
+    try {
+      for (const user of users) {
+        let userStore = stores.get(user.handle);
+        if (!userStore) {
+          userStore = deps.openUserStore(user.handle);
+          stores.set(user.handle, userStore);
+        }
+        for (const article of batch) {
+          if (copyToUser(userStore, article, null) === 'inserted') copied++;
+          else duplicates++;
+        }
+      }
+    } finally {
+      for (const s of stores.values()) s.close();
+    }
+
+    for (const a of batch) store.markRouted(a.stableId);
+
+    ctx.routeCounts = {
+      articles: batch.length,
+      matches: batch.length * users.length,
+      copied,
+      duplicates,
+    };
+    yield {
+      type: 'phase',
+      phase: 'shared-route-broadcast',
+      detail: `${batch.length} articles → ${users.length} user(s) (${copied} copied, ${duplicates} dup)`,
       counts: ctx.routeCounts,
     };
   },

@@ -38,7 +38,7 @@ import { VaultFs } from './tools/vault.js';
 import { scanSharedInbox, absorbInbox } from './phases/shared/absorb.js';
 import { enrichPending } from './phases/shared/enrich.js';
 import { summarizeEnriched } from './phases/shared/summarize.js';
-import { embedSummaries, routeEmbedded } from './phases/shared/route.js';
+import { embedSummaries, routeBroadcast, routeEmbedded } from './phases/shared/route.js';
 
 function parseArgs(): { minutes: number } {
   let minutes = 25;
@@ -75,9 +75,11 @@ async function main(): Promise<void> {
 
   const users = loadUsersOrEmpty();
   console.log(
-    `[shared] inbox=${env.inboxDir} db=${env.sharedDb} users=${users.length} minutes=${minutes}\n` +
+    `[shared] inbox=${env.inboxDir} db=${env.sharedDb} users=${users.length} minutes=${minutes} routing=${env.routingMode}\n` +
       `         summarize: ${env.fast.baseUrl}/${env.fast.model}\n` +
-      `         embed:     ${env.embed.baseUrl}/${env.embed.model}` +
+      (env.routingMode === 'embedding'
+        ? `         embed:     ${env.embed.baseUrl}/${env.embed.model}`
+        : '         embed:     (broadcast mode — embeddings not used)') +
       (env.unpaywallEmail ? '' : '\n         WARN: CHIYA_UNPAYWALL_EMAIL unset — OA enrichment rung disabled'),
   );
 
@@ -105,13 +107,20 @@ async function main(): Promise<void> {
     return new ArticleStore(join(userEnv.vaultDir, '.chiya-pipelines.db'));
   };
 
+  const routingPhases =
+    env.routingMode === 'embedding'
+      ? [
+          embedSummaries(store, env.embed),
+          routeEmbedded(store, users, env.embed, { openUserStore }),
+        ]
+      : [routeBroadcast(store, users, { openUserStore })];
+
   const phases = [
     scanSharedInbox(inboxFs),
     absorbInbox(inboxFs, store),
     enrichPending(store, { unpaywallEmail: env.unpaywallEmail }),
     summarizeEnriched(store, { client: clientFor(env.fast), model: env.fast.model }),
-    embedSummaries(store, env.embed),
-    routeEmbedded(store, users, env.embed, { openUserStore }),
+    ...routingPhases,
   ];
 
   // Reclaim jobs whose owner stopped heartbeating (crash, hard-kill).

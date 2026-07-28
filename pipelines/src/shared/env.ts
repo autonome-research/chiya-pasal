@@ -142,6 +142,17 @@ export function sharedDbPath(env: ChiyaEnv): string {
  * users.yaml. Unpaywall email is optional: without it the OA enrichment
  * rung is skipped (with a startup warning), everything else works.
  */
+/**
+ * How articles reach users:
+ *  - 'embedding': cosine-match summaries against interest vectors (needs
+ *    the embed endpoint up).
+ *  - 'broadcast': every quality-passing article goes to every enabled user;
+ *    no embeddings involved. The degraded-but-useful mode for when the
+ *    embedding service is down or not yet deployed — with a single user it
+ *    reproduces pre-multi-tenant behavior exactly.
+ */
+export type RoutingMode = 'embedding' | 'broadcast';
+
 export interface SharedEnv {
   dataRoot: string;
   /** <dataRoot>/shared/articles.db — cache + job log for the shared layer. */
@@ -149,8 +160,19 @@ export interface SharedEnv {
   /** Where matcha's *-articles.md files land. */
   inboxDir: string;
   unpaywallEmail: string | null;
+  routingMode: RoutingMode;
   fast: InferenceTarget;
   embed: InferenceTarget;
+}
+
+function routingMode(): RoutingMode {
+  const raw = process.env.CHIYA_ROUTING_MODE?.trim().toLowerCase() || 'embedding';
+  if (raw !== 'embedding' && raw !== 'broadcast') {
+    throw new Error(
+      `CHIYA_ROUTING_MODE must be 'embedding' or 'broadcast' (got '${raw}')`,
+    );
+  }
+  return raw;
 }
 
 export function loadSharedEnv(): SharedEnv {
@@ -161,6 +183,7 @@ export function loadSharedEnv(): SharedEnv {
     sharedDb: join(root, 'shared', 'articles.db'),
     inboxDir: resolve(process.env.CHIYA_SHARED_INBOX ?? join(root, 'shared', 'inbox')),
     unpaywallEmail: process.env.CHIYA_UNPAYWALL_EMAIL?.trim() || null,
+    routingMode: routingMode(),
     fast: targets.fast,
     embed: targets.embed,
   };
