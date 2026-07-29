@@ -133,6 +133,7 @@ export const prioritize =
             { client, toolExecutor: noTools, cache: ctx.cache, signal: ctx.signal },
           );
 
+          if (r.finishReason === 'error') return classifierSkip(article, 'classifier-error');
           if (r.finishReason === 'length') return classifierSkip(article, 'classifier-truncated');
           const parsed = parseAndValidateJson(r.text, validateClassifierOutput);
           if (!parsed.ok) return classifierSkip(article, parsed.reason);
@@ -166,6 +167,19 @@ export const prioritize =
             detail: `${index + 1}/${total} (latest: ${bucket})`,
           };
         }
+      }
+
+      // Transport failures degrade to per-article skips, which is right for a
+      // flaky endpoint — but when EVERY call failed the inference layer is
+      // down, and "0 highlights from N articles" would silently email an
+      // empty digest and squash-push. Fail the job so the outage is visible
+      // and the run retries once inference is back.
+      const errored = results.filter((c) => c.reason === 'classifier-error').length;
+      if (errored === results.length) {
+        throw new Error(
+          `prioritize: all ${errored} classifier calls failed — inference ` +
+            `endpoint down? Failing the digest instead of emailing an empty one.`,
+        );
       }
 
       ctx.classified = results;

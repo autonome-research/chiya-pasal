@@ -13,12 +13,48 @@ import { spawn } from 'child_process';
 
 export interface GitOpsOptions {
   vaultDir: string;
+  /**
+   * Git remote NAME (`origin`) or URL (`git@github.com:me/vault.git`).
+   * users.yaml stores vault_remote as a URL, so URLs are resolved to the
+   * repo's matching configured remote name before any fetch/push.
+   */
   remote: string;
   branch: string;
 }
 
 export class GitOps {
+  private resolvedRemote?: string;
+
   constructor(private readonly opts: GitOpsOptions) {}
+
+  /**
+   * Resolve opts.remote to a configured remote name (memoized). A value that
+   * matches a remote name is used as-is; a URL is matched against each
+   * remote's fetch URL (ignoring a trailing `.git`). Anything else throws —
+   * a misconfigured remote must fail loudly, not push somewhere surprising.
+   */
+  private async remoteName(): Promise<string> {
+    if (this.resolvedRemote) return this.resolvedRemote;
+    const names = (await this.run(['remote']))
+      .stdout.split('\n').map((n) => n.trim()).filter(Boolean);
+    const target = this.opts.remote;
+    if (names.includes(target)) {
+      this.resolvedRemote = target;
+      return target;
+    }
+    const strip = (u: string) => u.replace(/\.git$/, '');
+    for (const name of names) {
+      const url = (await this.run(['remote', 'get-url', name])).stdout.trim();
+      if (strip(url) === strip(target)) {
+        this.resolvedRemote = name;
+        return name;
+      }
+    }
+    throw new Error(
+      `vault remote '${target}' is neither a configured remote name nor the ` +
+        `URL of one (configured: ${names.join(', ') || 'none'}) in ${this.opts.vaultDir}`,
+    );
+  }
 
   /** Returns true iff there are uncommitted changes (staged or working). */
   async hasChanges(): Promise<boolean> {
@@ -53,7 +89,7 @@ export class GitOps {
 
   /** git fetch <remote> <branch> — refresh remote tracking. */
   async fetch(): Promise<void> {
-    await this.run(['fetch', this.opts.remote, this.opts.branch]);
+    await this.run(['fetch', await this.remoteName(), this.opts.branch]);
   }
 
   /** Number of local commits ahead of <remote>/<branch>. */
@@ -61,7 +97,7 @@ export class GitOps {
     const out = await this.run([
       'rev-list',
       '--count',
-      `${this.opts.remote}/${this.opts.branch}..HEAD`,
+      `${await this.remoteName()}/${this.opts.branch}..HEAD`,
     ]);
     return parseInt(out.stdout.trim(), 10) || 0;
   }
@@ -93,7 +129,7 @@ export class GitOps {
     if (count === 0) return { pushed: false, squashedCount: 0 };
 
     if (count > 1) {
-      const remoteRef = `${this.opts.remote}/${this.opts.branch}`;
+      const remoteRef = `${await this.remoteName()}/${this.opts.branch}`;
       try {
         await this.run(['merge-base', '--is-ancestor', remoteRef, 'HEAD']);
       } catch {
@@ -106,7 +142,7 @@ export class GitOps {
       await this.run(['reset', '--soft', remoteRef]);
       await this.run(['commit', '-m', messageBuilder(count)]);
     }
-    await this.run(['push', this.opts.remote, this.opts.branch]);
+    await this.run(['push', await this.remoteName(), this.opts.branch]);
     const sha = (await this.run(['rev-parse', 'HEAD'])).stdout.trim();
     return { pushed: true, squashedCount: count, sha };
   }
