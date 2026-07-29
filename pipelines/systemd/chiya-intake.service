@@ -12,7 +12,7 @@ WorkingDirectory=%h/chiya-library/pipelines
 # using this node_modules crashes at first DB open. Rebuilding before each
 # run is ~1s when the binding's already current and the only reliable fix
 # when it isn't. See chiya-library/docs/runbook for full incident notes.
-ExecStartPre=/usr/bin/env npm rebuild better-sqlite3 --silent
+ExecStartPre=%h/chiya-library/pipelines/scripts/rebuild-better-sqlite3.sh
 ExecStart=/usr/bin/env npx tsx src/intake.ts
 Environment=VAULT_DIR=%h/vault
 # Intake doesn't read CHIYA_EMAIL_TO, but loading the file keeps the env

@@ -12,7 +12,7 @@ WorkingDirectory=%h/chiya-library/pipelines
 # using this node_modules crashes at first DB open. Rebuilding before each
 # run is ~1s when the binding's already current and the only reliable fix
 # when it isn't.
-ExecStartPre=/usr/bin/env npm rebuild better-sqlite3 --silent
+ExecStartPre=%h/chiya-library/pipelines/scripts/rebuild-better-sqlite3.sh
 # Per-article router → 4 parallel scouts → reviewer → deterministic write.
 # Outer batch concurrency=4, per-article wall ~50-85s under load (7 LLM calls
 # per article). batch=10 + minutes=8 lands ~4-5 min, comfortably under the

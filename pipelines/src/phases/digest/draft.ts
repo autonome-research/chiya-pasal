@@ -71,7 +71,7 @@ export const draftSections =
 
       const sections: DigestSection[] = [];
 
-      const [focusBody, notableBody, followupBody] = await Promise.all([
+      const [focusDraft, notableDraft, followupDraft] = await Promise.all([
         draftOneSection(client, model, ctx, '🔭 Current Focus Hits',
           'Articles relevant to the user\'s active focuses and research projects', focus, vault),
         draftOneSection(client, model, ctx, '📚 New & Notable',
@@ -80,16 +80,33 @@ export const draftSections =
           'Developments on topics already in the wiki — cite the existing page in [[brackets]]', followup, vault),
       ]);
 
-      sections.push({ heading: '🔭 Current Focus Hits', body: focusBody });
-      sections.push({ heading: '📚 New & Notable', body: notableBody });
-      sections.push({ heading: '🔄 Follow-ups', body: followupBody });
+      for (const draft of [focusDraft, notableDraft, followupDraft]) {
+        if (draft.warning) {
+          yield { type: 'phase', phase: 'draft-sections', detail: draft.warning };
+        }
+      }
+
+      sections.push({ heading: '🔭 Current Focus Hits', body: focusDraft.body });
+      sections.push({ heading: '📚 New & Notable', body: notableDraft.body });
+      sections.push({ heading: '🔄 Follow-ups', body: followupDraft.body });
       sections.push({ heading: '🏗️ Library Updates', body: extractLibraryUpdates(vault.logTail) });
 
       ctx.sections = sections;
     },
   });
 
-async function draftOneSection(
+export interface SectionDraft {
+  body: string;
+  /** Set when the LLM draft was abandoned and the deterministic fallback used. */
+  warning?: string;
+}
+
+/** One LLM attempt at a section body under the given output-token budget. */
+export type SectionAgentFn = (
+  maxTokens: number,
+) => Promise<{ text: string; finishReason: string | null }>;
+
+function draftOneSection(
   client: OpenAI,
   model: string,
   ctx: DigestCtx,
@@ -97,25 +114,59 @@ async function draftOneSection(
   bucketRole: string,
   classified: ClassifiedArticle[],
   vault: VaultContext,
-): Promise<string> {
-  if (classified.length === 0) return '_Nothing this cycle._';
+): Promise<SectionDraft> {
+  const agentFn: SectionAgentFn = async (maxTokens) => {
+    const r = await runAgentWithTools(
+      {
+        name: `drafter:${bucketLabel}`,
+        systemPrompt: SECTION_SYSTEM,
+        model,
+        tools: [],
+        maxToolRounds: 1,
+        maxTokens,
+      },
+      [{ role: 'user', content: buildSectionUserMessage(bucketLabel, bucketRole, classified, vault) }],
+      { client, toolExecutor: noTools, cache: ctx.cache, signal: ctx.signal },
+    );
+    return { text: r.text, finishReason: r.finishReason ?? null };
+  };
+  return draftOneSectionWith(bucketLabel, classified, agentFn);
+}
 
-  const r = await runAgentWithTools(
-    {
-      name: `drafter:${bucketLabel}`,
-      systemPrompt: SECTION_SYSTEM,
-      model,
-      tools: [],
-      maxToolRounds: 1,
-      maxTokens: FAST_MAX_TOKENS,
-    },
-    [{ role: 'user', content: buildSectionUserMessage(bucketLabel, bucketRole, classified, vault) }],
-    { client, toolExecutor: noTools, cache: ctx.cache, signal: ctx.signal },
-  );
-  if (r.finishReason === 'length') {
-    throw new Error(`digest section draft truncated: ${bucketLabel}`);
+/**
+ * Retry/fallback policy, separated from LLM transport for testability.
+ *
+ * Truncation must never sink the whole digest: retry once with double the
+ * budget (reasoning models occasionally burn the cap on hidden reasoning),
+ * then fall back to a deterministic rendering of the classifier output.
+ */
+export async function draftOneSectionWith(
+  bucketLabel: string,
+  classified: ClassifiedArticle[],
+  agentFn: SectionAgentFn,
+): Promise<SectionDraft> {
+  if (classified.length === 0) return { body: '_Nothing this cycle._' };
+
+  for (const maxTokens of [FAST_MAX_TOKENS, FAST_MAX_TOKENS * 2]) {
+    const r = await agentFn(maxTokens);
+    if (r.finishReason !== 'length' && r.text.trim()) {
+      return { body: r.text.trim() };
+    }
   }
-  return r.text.trim();
+  return {
+    body: renderSectionFallback(classified),
+    warning: `digest section draft truncated twice, used deterministic fallback: ${bucketLabel}`,
+  };
+}
+
+/** LLM-free section body: same bullet contract, straight from classifier output. */
+export function renderSectionFallback(classified: ClassifiedArticle[]): string {
+  return classified
+    .map((c) => {
+      const extendsNote = c.wikilinks.length ? ` (extends ${c.wikilinks.join(', ')})` : '';
+      return `- [${c.article.title}](${c.article.url}) — ${c.reason}${extendsNote} [${c.article.field}]`;
+    })
+    .join('\n');
 }
 
 function extractLibraryUpdates(logTail: string): string {
