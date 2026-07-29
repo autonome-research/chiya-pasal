@@ -41,6 +41,20 @@ Rules:
 - keep the live Markdown-first collector behavior unchanged until a deliberate migration decision
 - preserve cross-day dedup safety: the raw collector checks archived `*-articles.md` files, while ArticleStore remains the long-term dedup source of truth
 
+## Changing the shared pipeline (absorb / enrich / summarize / route)
+
+The multi-tenant shared layer lives in `pipelines/src/phases/shared/` with its store in `pipelines/src/shared/shared-article-store.ts` and entry point `pipelines/src/shared-pipeline.ts`. It runs once per article for all users.
+
+Rules:
+
+- respect the article FSM: `pending → enriched | enrich-failed → summarized → (embedded →) routed | rejected-quality | failed`. Mark a status only after the work it records is durably complete — crash-resumability depends on it.
+- enrichment failures must be classified: retryable (timeouts, 429/5xx) stay `pending`; permanent failures go `enrich-failed` and fall back to the abstract. Never let one bad URL wedge the queue.
+- the quality gate is conservative by design: it only drops `kind` announcement/other or `rigor ≤ 1`, and fails open when the `## Assessment` block can't be parsed. Rejected rows keep their assessment columns (`quality_*`) so the gate floor can be tuned from data — don't discard them.
+- routing must support both modes behind `CHIYA_ROUTING_MODE` (`embedding` and `broadcast`); never make the embedding endpoint a hard dependency of the pipeline.
+- routed articles are COPIED into each user's ArticleStore (summary → `snippet`, refs columns, shared provenance). Per-user stores stay independently rebuildable; don't introduce cross-store references.
+- in embedding mode, log the full score matrix to `routing_log` — it is the tuning data for the threshold.
+- tenants come from `config/users.yaml` via `pipelines/src/shared/users.ts`; mutate the registry only through `npm run admin -- users ...` (comment-preserving YAML transforms in `users-admin.ts`).
+
 ## Adding or changing a digest section
 
 Digest implementation is split under `pipelines/src/phases/digest/`:

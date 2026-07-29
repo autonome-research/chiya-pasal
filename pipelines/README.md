@@ -28,14 +28,14 @@ npm run build
 
 ### Required env
 
-`VAULT_DIR` and `CHIYA_EMAIL_TO` are the only must-set vars. Everything else has defaults wired for the tiny-emerson Ollama tunnel + local vault. Put them in `pipelines/.env` (gitignored) — systemd loads via `EnvironmentFile=`.
+In multi-tenant mode (a `config/users.yaml` exists) per-user email, vault, and interests come from the tenant registry, and `CHIYA_UNPAYWALL_EMAIL` should be set so the OA enrichment rung works. `CHIYA_EMAIL_TO` is required only in legacy single-tenant mode. Everything else has defaults wired for the tiny-emerson vllm tunnel + the `~/chiya-data` layout. Put overrides in `pipelines/.env` (gitignored) — systemd loads via `EnvironmentFile=`.
 
 | Var | Default | Notes |
 |---|---|---|
 | `VAULT_DIR` | `~/vault` | Vault repo root |
 | `VAULT_REMOTE` | `origin` | Git remote to push to |
 | `VAULT_BRANCH` | `main` | |
-| `CHIYA_EMAIL_TO` | *(required)* | Digest delivery target |
+| `CHIYA_EMAIL_TO` | *(required in single-tenant mode)* | Digest delivery target; multi-tenant reads per-user email from users.yaml |
 | `FAST_INFERENCE_BASE_URL` | `http://localhost:11435/v1` | Fast-tier OpenAI-compatible endpoint |
 | `FAST_INFERENCE_MODEL` | `qwen36` | Digest classify/draft + librarian summary. No tools. |
 | `TOOLS_INFERENCE_BASE_URL` | `http://localhost:11435/v1` | Tool-capable endpoint (same vllm on tiny-emerson:9000) |
@@ -77,8 +77,8 @@ Each pipeline run logs every event to stdout. Persisted job + event log lives in
 ```bash
 mkdir -p ~/.config/systemd/user
 ln -sf ~/chiya-library/pipelines/systemd/chiya-tunnel-tiny.service ~/.config/systemd/user/
-ln -sf ~/chiya-library/pipelines/systemd/chiya-intake.service      ~/.config/systemd/user/
-ln -sf ~/chiya-library/pipelines/systemd/chiya-intake.timer        ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-shared.service      ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-shared.timer        ~/.config/systemd/user/
 ln -sf ~/chiya-library/pipelines/systemd/chiya-librarian.service   ~/.config/systemd/user/
 ln -sf ~/chiya-library/pipelines/systemd/chiya-librarian.timer     ~/.config/systemd/user/
 ln -sf ~/chiya-library/pipelines/systemd/chiya-digest@.service     ~/.config/systemd/user/
@@ -88,7 +88,7 @@ ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-pm.timer     ~/.config/sys
 systemctl --user daemon-reload
 systemctl --user enable --now \
   chiya-tunnel-tiny.service \
-  chiya-intake.timer \
+  chiya-shared.timer \
   chiya-librarian.timer \
   chiya-digest-am.timer \
   chiya-digest-pm.timer
@@ -98,9 +98,11 @@ systemctl --user list-timers chiya-*
 
 Every pipeline service has `ExecStartPre=npm rebuild better-sqlite3` so a silent Node ABI bump can't break the DB binding. Roughly 1s when already-current, ~30s when actually rebuilding.
 
+Legacy units still in `systemd/` but not installed: `chiya-intake.{service,timer}` (intake is retired — absorbed into the shared pipeline) and `chiya-embed.service` (kubectl port-forward for the embedding endpoint; only needed when `CHIYA_ROUTING_MODE=embedding` and the embed service is back).
+
 Manual triggers:
 ```bash
-systemctl --user start chiya-intake.service
+systemctl --user start chiya-shared.service
 systemctl --user start chiya-librarian.service
 systemctl --user start chiya-digest@AM.service
 journalctl --user -u chiya-librarian.service -f
@@ -117,32 +119,53 @@ The live matcha collector calls the TypeScript API ingest from `matcha/scripts/c
 
 `CHIYA_MATCHA_DIR` can override the computed `matcha/` path for tests or non-standard deployments. Registered API adapters now cover the legacy Python collector's active public endpoints: Semantic Scholar, OpenAlex, Crossref, arXiv, Zenodo, DOAJ, Europe PMC, INSPIRE-HEP, NCBI/PubMed, and OSF. Source HTTP calls use shared timeout/retry handling and report `health:elapsedMs` / `health:attempts` entries in `api-digest.md` source-health warnings.
 
-### intake.ts
+### shared-pipeline.ts
+
+One job per tick (`chiya-shared`, heartbeat-owned lock), doing the expensive per-article work once regardless of how many users are enabled:
 
 ```
-scanInbox          (pure)   read vault/raw/inbox/*-articles.md
-parseAndStore      (pure)   upsert into ArticleStore (URL + title hash dedup)
-archiveInboxFiles  (pure)   move processed files → vault/raw/inbox/archive/
+scanSharedInbox     (pure)   read $CHIYA_SHARED_INBOX/*-articles.md
+absorbInbox         (pure)   parse → upsert into SharedArticleStore (stable URL-hash IDs,
+                              dedup, query labels) → archive processed files
+enrichPending       (HTTP)   full text ladder: arXiv HTML → direct URL → Unpaywall OA
+                              (pdftotext for PDFs). Retryable failures stay 'pending';
+                              hard failures → 'enrich-failed' (abstract-only fallback)
+summarizeEnriched   (LLM)    rich structured summary (methods / data / findings /
+                              conclusions) + mandatory `## Assessment` block
+                              (rigor 0-5, evidence 0-5, kind). Quality gate drops
+                              kind announcement/other or rigor ≤ 1 → 'rejected-quality'
+                              (fail-open: unparseable assessments pass through)
+route               (mode)   CHIYA_ROUTING_MODE:
+                              embedding — embed summaries, cosine-match against each
+                                          user's interest paragraphs (threshold 0.43),
+                                          full score matrix logged to routing_log
+                              broadcast — every quality-passing article to every
+                                          enabled user (current live mode)
+                              matched articles are COPIED into each user's ArticleStore
+                              (summary → snippet, refs columns, shared provenance)
 ```
 
-No LLM. Idempotent — re-running on the same files inserts nothing new. If the ArticleStore DB is ever lost/reset while raw inbox archives remain, recover dedup memory with `npm run backfill-archive-articles -- --status=done`, or re-queue archived resources for graph curation with `-- --status=pending`.
+Shared-cache article FSM: `pending → enriched | enrich-failed → summarized → (embedded →) routed | rejected-quality | failed`. Status transitions happen only after the work they record is durably complete, so a crash mid-tick resumes cleanly at the next one. Unresolved external references reported by per-user librarians accumulate in the shared `citation_demand` ledger (the trigger data for future demand-driven ingestion).
+
+### intake.ts (retired)
+
+The single-tenant intake (scan `vault/raw/inbox` → ArticleStore → archive) is absorbed into the shared pipeline's absorb phase. `npm run intake` and the code remain for legacy single-tenant deployments, but the live system does not run it. Its recovery script is still current: if a per-user ArticleStore is lost/reset while raw inbox archives remain, recover dedup memory with `npm run backfill-archive-articles -- --status=done`, or re-queue archived resources for graph curation with `-- --status=pending`.
 
 ### librarian.ts
+
+Multi-tenant: `main` iterates enabled users from `config/users.yaml` (or falls back to the legacy single-tenant env when no users file exists), each under its own job lock (`chiya-librarian:<handle>`) against its own vault + DB. One tenant failing doesn't block the others; `--user <handle>` restricts a run to one tenant.
 
 ```
 reapStale           (pure)   reset stuck 'processing' rows (> 20 min) back to pending
 loadBatch           (pure)   pull up to N pending rows, mark as processing
                               (--dry-run leaves rows pending)
-batchEnrich         (HTTP)   fetch full text for thin snippets, capped at 50KB
-batchExtractRefs    (pure)   regex-extract arxiv IDs + DOIs from each body
 planArticleTree     (LLM)    per-article fan-out, concurrency=4, no writes:
                               ├── router          (1 call, no tools)
                               ├── topic-scout     (vault_read, vault_list, vault_search)
                               ├── source-scout    (+ article_search_by_title)
                               ├── entity-scout    (vault tools)
                               ├── cite-tracker    (+ article_lookup_by_arxiv/doi)
-                              ├── reviewer        (synthesizes the 4 scouts, vault_read)
-                              └── summary         (fast-tier, no tools)
+                              └── reviewer        (synthesizes the 4 scouts, vault_read)
 applyArticlePlans   (pure)   serial revalidation + deterministic writes
                               source page + topic touches + cite/entity backlinks + related source edges + ArticleStore status
                               (--dry-run revalidates and reports would-write/would-skip/would-fail without writes)
@@ -150,7 +173,7 @@ mergeMetadata       (pure)   append per-article entries to vault/log.md
 commitLocal         (pure)   single git commit per run (no push — digest pushes)
 ```
 
-Per-article planning wall: ~50-85s (7 LLM calls). Batch=10 + planning concurrency=4 → ~4-5 min/batch, fits in the 8-min in-pipeline deadline + 20-min systemd hard kill. Vault/DB writes are then applied serially to avoid lost updates on shared topic/backlink pages. New topic proposals are reconciled against both existing topics and other new proposals in the same reviewer output, so near-duplicates collapse before page creation. Reviewer-approved related sources are rendered as source-page frontmatter (`related: [...]`) and a `## Related sources` wikilink section. The apply/metadata/commit block runs under a cross-process vault mutation lock shared with digest publishing.
+Enrichment, reference extraction, and summarization all happen upstream in the shared pipeline: the article body the planner sees IS the pre-computed rich summary (`snippet` column), and refs arrive in dedicated columns (regex fallback only for legacy rows). Per-article planning wall: ~40-70s (6 LLM calls). Batch=10 + planning concurrency=4 fits in the 8-min in-pipeline deadline + 20-min systemd hard kill. Vault/DB writes are then applied serially to avoid lost updates on shared topic/backlink pages. New topic proposals are reconciled against both existing topics and other new proposals in the same reviewer output, so near-duplicates collapse before page creation. Reviewer-approved related sources are rendered as source-page frontmatter (`related: [...]`) and a `## Related sources` wikilink section. Unresolved cites render as `## External references` (cap 10) on the source page and are recorded in the shared citation-demand ledger only after the source page is durably written. The apply/metadata/commit block runs under a cross-process vault mutation lock shared with digest publishing.
 
 ### digest.ts
 
@@ -174,14 +197,12 @@ Push strategy: many small local commits accumulate (librarian and digest both); 
 
 ## Crash recovery
 
-Two mechanisms keep a crashed run from blocking everything that follows:
+Four mechanisms keep a crashed run from blocking everything that follows:
 
-1. **`sweepStaleJobLock`** — runs before `acquireExclusive` in both librarian and digest. If a process died between acquire and `setCompleted`/`setFailed`, the lock row would sit `RUNNING` forever; the sweep flips any same-name `RUNNING` row older than the configured threshold to `FAILED`. Thresholds sit safely above each unit's `TimeoutStartSec` (librarian: 30m, digest: 25m).
+1. **Heartbeat job ownership (thread-phase v6)** — every runner is constructed with `heartbeatMs: 30_000` and calls `runner.reconcileAbandoned(5 * 60 * 1000)` before `acquireExclusive`. A running job's owner refreshes its heartbeat every 30s; if the process dies, the heartbeat goes stale and the next run reconciles the job as abandoned before acquiring the lock. This replaced the old wall-clock `sweepStaleJobLock` (deleted with the v6 upgrade) — no threshold tuning against systemd timeouts needed.
 
-2. **`reapStaleProcessing`** — first phase of every librarian run. Resets any `article.status='processing'` row older than 20 min back to `pending`. The librarian's `acquireExclusive` guarantees no concurrent runs, so we can't reap a live row by accident.
+2. **`reapStaleProcessing`** — first phase of every librarian run. Resets any `article.status='processing'` row older than 20 min back to `pending`. The librarian's `acquireExclusive` guarantees no concurrent runs per tenant, so we can't reap a live row by accident. Tested in `__tests__/article-store.test.ts`.
 
-Both are tested in `__tests__/sweep-stale-job.test.ts` and `__tests__/article-store.test.ts`.
-
-3. **`VaultMutationLock`** — wraps librarian apply/metadata/commit and digest append/commit/push using an atomic lock directory under the vault root. This prevents cross-service `log.md` and git races while still allowing the expensive agent planning/classification work to run outside the lock.
+3. **`VaultMutationLock`** — wraps librarian apply/metadata/commit and digest append/commit/push using an atomic lock directory under the vault root. This prevents cross-service `log.md` and git races while still allowing the expensive agent planning/classification work to run outside the lock. Tested in `__tests__/vault-mutation-lock.test.ts`.
 
 4. **`backfill-archive-articles`** — restores ArticleStore rows from `raw/inbox/archive/*-articles.md` after DB loss/reset. Use `--status=done` for dedup-memory recovery without graph work, or `--status=pending` when archived resources should be curated into the graph. The script preserves the original archive date from the filename so old resources do not masquerade as today's collection.

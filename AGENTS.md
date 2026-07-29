@@ -84,7 +84,9 @@ When working on collection, preserve the existing live artifacts unless delibera
 ```text
 matcha/scripts/api-articles.jsonl
 matcha/scripts/api-digest.md
-vault/raw/inbox/*-articles.md
+~/chiya-data/shared/raw/inbox/*-articles.md   (the shared inbox — matcha runs with
+                                               VAULT_DIR=~/chiya-data/shared so its
+                                               $VAULT_DIR/raw/inbox output lands here)
 ```
 
 ## Safety mechanisms that should not be regressed

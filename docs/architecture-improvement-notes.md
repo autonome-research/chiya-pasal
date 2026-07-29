@@ -2,6 +2,8 @@
 
 Date: 2026-05-30
 
+> **Status note (2026-07-29):** this review predates the July 2026 multi-tenant redesign (shared absorb→enrich→summarize→route pipeline, `config/users.yaml` tenants, routing modes, quality gate, citation-demand ledger) and the thread-phase v6 upgrade (heartbeat-owned job lifecycle replacing wall-clock lock sweeps; `PRAGMA user_version` migrations in the job store). Several items below are since resolved — graceful cancellation (§5), digest modularization (§3), job-store migrations (§12 for the job side). Treat this as historical planning context; where it conflicts with `README.md` / `pipelines/README.md`, the READMEs win.
+
 This document captures the current architecture review findings, known maintainability risks, and future opportunities for Chiya Library. It is intended as a working planning note before larger refactors.
 
 ## Current assessment

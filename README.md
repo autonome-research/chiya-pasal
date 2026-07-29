@@ -64,27 +64,30 @@ chiya-library/
 │   └── logs/                    # Collection logs
 └── pipelines/                   # Curation layer (TS, thread-phase)
     ├── src/
-    │   ├── intake.ts            # Pipeline entry points
-    │   ├── librarian.ts
-    │   ├── digest.ts
+    │   ├── shared-pipeline.ts   # SHARED pipeline entry (absorb→enrich→summarize→route)
+    │   ├── librarian.ts         # Per-user curation entry (multi-tenant loop)
+    │   ├── digest.ts            # Per-user digest entry (multi-tenant loop)
+    │   ├── admin.ts             # Tenant admin CLI (users.yaml)
+    │   ├── doctor.ts            # Operational health checks
+    │   ├── status.ts            # Article/job status CLI
+    │   ├── intake.ts            # Legacy single-tenant intake (retired)
     │   ├── phases/              # Phase compositions
-    │   │   ├── intake-phases.ts
+    │   │   ├── shared/          # absorb / enrich / summarize / route
     │   │   ├── librarian-phases.ts
     │   │   ├── librarian-planner.ts
     │   │   ├── librarian-apply.ts
     │   │   ├── librarian-router.ts
     │   │   ├── scouts/          # 4 parallel exploration scouts
     │   │   ├── reviewer.ts
-    │   │   ├── summary.ts
-    │   │   ├── digest-phases.ts
     │   │   ├── digest/          # context/load/classify/draft/publish modules
     │   │   ├── page-templates.ts
     │   │   └── topic-reconciler.ts
-    │   ├── shared/              # ArticleStore, env, types
+    │   ├── shared/              # Stores (shared + per-user), env, routing, users, types
+    │   ├── collection/          # TS API source adapters
     │   └── tools/               # vault / git / email / web / article-lookup
     ├── scripts/                 # One-shots (migrations, dumps)
     ├── systemd/                 # User timer/service units
-    └── __tests__/               # Vitest suite (373 tests)
+    └── __tests__/               # Vitest suite (511 tests)
 ```
 
 The wiki is a separate repo (`~/vault`) — not vendored here. Sources live at `wiki/sources/<stable-id>.md`, topics at `wiki/topics/<slug>.md` (flat, with `clusters:` frontmatter for soft domain metadata), entities at `wiki/entities/<slug>.md`. The append-only `log.md` and `index.md` sit at the vault root.
