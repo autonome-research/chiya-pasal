@@ -14,6 +14,12 @@ Type=simple
 # whose chat template hardcodes its own tool surface and ignores the
 # request's `tools` parameter, causing scouts to confabulate rather than
 # invoke real tool calls.
+#
+# Target is the Tailscale node IP, not the LAN hostname: tailnet IPs are
+# stable per node, while `tiny-emerson` resolves through the router's DNS,
+# which went stale when the box moved networks (Jul 2026: two days of
+# crash-looping against a dead LAN address while the box was fine on the
+# tailnet).
 ExecStart=/usr/bin/ssh \
   -NL 11435:127.0.0.1:9000 \
   -o ServerAliveInterval=30 \
@@ -21,7 +27,7 @@ ExecStart=/usr/bin/ssh \
   -o ExitOnForwardFailure=yes \
   -o BatchMode=yes \
   -o StrictHostKeyChecking=accept-new \
-  tiny@tiny-emerson
+  tiny@100.112.45.51
 Restart=on-failure
 RestartSec=10
 
