@@ -8,7 +8,16 @@
 # units then die before running any pipeline code. One lock file under
 # pipelines/ serializes rebuilds across units (and dev runs that use this
 # script instead of calling npm rebuild directly).
+# The rebuild is also CONDITIONAL: `npm rebuild` recompiles unconditionally
+# (~30s), deleting the .node file mid-recompile — a unit whose main process
+# is loading modules during another unit's rebuild crashes with "could not
+# locate the bindings file" even with the flock (the lock serializes
+# rebuilds against each other, not against module loads). Skipping the
+# rebuild when the binding already loads shrinks that window to the rare
+# post-Node-upgrade tick, where crashed units self-heal on their next run.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-exec flock -w 300 .rebuild-better-sqlite3.lock \
+exec flock -w 300 .rebuild-better-sqlite3.lock bash -c '
+  node -e "require(\"better-sqlite3\")" 2>/dev/null && exit 0
   npm rebuild better-sqlite3 --silent
+'
