@@ -25,6 +25,11 @@ export interface TopicProposal {
   definition: string;
   /** Member identifiers (article indices or ids). Length >= 1. */
   members: number[];
+  /** Soft cluster labels for the page this proposal would create. Carried
+   *  through untouched — the reconciler arbitrates slugs, not metadata; a
+   *  proposal folded into an existing slug loses them with the rest of the
+   *  proposal (the existing page owns its own clusters). */
+  clusters?: string[];
 }
 
 export interface TopicOutput {

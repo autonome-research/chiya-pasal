@@ -5,7 +5,10 @@ import { join } from 'path';
 import { PipelineCache } from 'thread-phase';
 
 import { embedSummaries, routeBroadcast, routeEmbedded } from '../../src/phases/shared/route.js';
-import { SharedArticleStore } from '../../src/shared/shared-article-store.js';
+import {
+  SharedArticleStore,
+  type QualityAssessment,
+} from '../../src/shared/shared-article-store.js';
 import { ArticleStore } from '../../src/shared/article-store.js';
 import type { SharedPipelineCtx } from '../../src/shared/shared-pipeline-types.js';
 import type { EmbeddingResult, EmbeddingTarget } from '../../src/shared/embedding.js';
@@ -59,7 +62,11 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function seedSummarized(stableId: string, summary: string): void {
+function seedSummarized(
+  stableId: string,
+  summary: string,
+  quality: QualityAssessment | null = null,
+): void {
   store.upsertCollected({
     stableId,
     url: `https://example.com/${stableId}`,
@@ -70,7 +77,7 @@ function seedSummarized(stableId: string, summary: string): void {
     abstract: 'abs',
   });
   store.markEnriched(stableId, 'text', ['1607.08221'], []);
-  store.markSummarized(stableId, summary, null);
+  store.markSummarized(stableId, summary, quality);
 }
 
 describe('embedSummaries', () => {
@@ -139,6 +146,50 @@ describe('routeEmbedded', () => {
     expect(rows[0]!.refsArxiv).toEqual(['1607.08221']);
     expect(rows[0]!.routedSimilarity).toBeCloseTo(1.0, 6);
     expect(rows[0]!.collectedFrom).toBe('shared-router');
+  });
+
+  it('carries the shared quality assessment into the per-user copy', async () => {
+    seedSummarized('match', 'summary about interpretability', {
+      rigor: 4,
+      evidence: 3,
+      kind: 'research',
+    });
+    const vectorFor = (): number[] => [1, 0];
+    await drain(embedSummaries(store, TARGET, { embed: fakeEmbed(vectorFor) }).run(makeCtx()));
+
+    const { factory, paths } = userStoreFactory();
+    await drain(
+      routeEmbedded(store, [makeUser({})], TARGET, {
+        embed: fakeEmbed(vectorFor),
+        openUserStore: factory,
+      }).run(makeCtx()),
+    );
+
+    const aliceStore = new ArticleStore(paths.get('alice')!);
+    const rows = aliceStore.listPending(10);
+    aliceStore.close();
+    expect(rows[0]!.qualityRigor).toBe(4);
+    expect(rows[0]!.qualityEvidence).toBe(3);
+  });
+
+  it('unscored shared rows copy through with null quality', async () => {
+    seedSummarized('match', 'summary about interpretability');
+    const vectorFor = (): number[] => [1, 0];
+    await drain(embedSummaries(store, TARGET, { embed: fakeEmbed(vectorFor) }).run(makeCtx()));
+
+    const { factory, paths } = userStoreFactory();
+    await drain(
+      routeEmbedded(store, [makeUser({})], TARGET, {
+        embed: fakeEmbed(vectorFor),
+        openUserStore: factory,
+      }).run(makeCtx()),
+    );
+
+    const aliceStore = new ArticleStore(paths.get('alice')!);
+    const rows = aliceStore.listPending(10);
+    aliceStore.close();
+    expect(rows[0]!.qualityRigor).toBeNull();
+    expect(rows[0]!.qualityEvidence).toBeNull();
   });
 
   it('persists the full score matrix including unrouted pairs', async () => {
@@ -266,6 +317,18 @@ describe('routeBroadcast (embeddings-down mode)', () => {
       expect(rows.every((r) => r.collectedFrom === 'shared-router')).toBe(true);
       expect(rows.every((r) => r.sharedStableId !== null)).toBe(true);
     }
+  });
+
+  it('carries quality through the broadcast path too', async () => {
+    seedSummarized('a1', 'summary one', { rigor: 5, evidence: 2, kind: 'survey' });
+    const { factory, paths } = userStoreFactory();
+    await drain(routeBroadcast(store, [makeUser({})], { openUserStore: factory }).run(makeCtx()));
+
+    const s = new ArticleStore(paths.get('alice')!);
+    const rows = s.listPending(10);
+    s.close();
+    expect(rows[0]!.qualityRigor).toBe(5);
+    expect(rows[0]!.qualityEvidence).toBe(2);
   });
 
   it('writes no routing_log rows (broadcast carries no tuning signal)', async () => {

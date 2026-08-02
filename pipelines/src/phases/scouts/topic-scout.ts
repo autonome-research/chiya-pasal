@@ -24,6 +24,11 @@ export interface TopicScoutInput {
   /** Per-article task from the librarian-router (1-3 sentences telling the
    *  scout what to look for). May be empty for a default-prompt run. */
   task: string;
+  /** Cluster-grouped slug inventory rendered ONCE per librarian run
+   *  (vocabularyForPrompt, ~2000 chars). Seeds the scout's searches with slugs
+   *  that actually exist instead of keywords it guesses. Absent → the scout
+   *  explores blind, as before the registry existed. */
+  vocabulary?: string;
 }
 
 export interface TopicScoutClients {
@@ -89,6 +94,28 @@ OUTPUT (JSON only, no preamble, no code fences):
   ]
 }`;
 
+/** Heading the run-level topic vocabulary is injected under. Exported so
+ *  tests can assert the scout is no longer searching a namespace it cannot
+ *  see. */
+export const SCOUT_VOCABULARY_HEADING = '## Existing topic vocabulary (a partial inventory)';
+
+/**
+ * System prompt for one librarian run. The vocabulary is appended so the
+ * static policy prefix stays byte-identical for prompt caching, and is
+ * rendered once per run rather than once per article.
+ */
+export function buildTopicScoutSystemPrompt(vocabulary?: string): string {
+  const vocab = vocabulary?.trim();
+  if (!vocab) return SYSTEM_PROMPT;
+  return (
+    `${SYSTEM_PROMPT}\n\n${SCOUT_VOCABULARY_HEADING}\n\n` +
+    'Each line is "cluster (topic count): slugs". These pages EXIST. Use them to aim your ' +
+    'searches — but the list is elided ("(+N more)"), so still search for concepts you do not ' +
+    'see here, and still vault_read before surfacing a page.\n\n' +
+    vocab
+  );
+}
+
 function formatUserMessage(input: TopicScoutInput): string {
   const { article, body, task } = input;
   const taskLine = task.trim().length > 0
@@ -151,10 +178,11 @@ export async function runTopicScoutWith(
   registerReadOnlyVaultTools(registry, vault);
 
   const userMessage = formatUserMessage(input);
+  const systemPrompt = buildTopicScoutSystemPrompt(input.vocabulary);
 
   let r: { text: string; finishReason: string; toolRounds: number };
   try {
-    r = await agentFn(SYSTEM_PROMPT, userMessage, registry, clients, signal);
+    r = await agentFn(systemPrompt, userMessage, registry, clients, signal);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { surfacedPages: [], error: msg.slice(0, 200) };

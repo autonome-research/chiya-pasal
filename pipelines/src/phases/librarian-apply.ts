@@ -18,6 +18,7 @@ import type {
   PlannedArticle,
 } from '../shared/librarian-types.js';
 import type { VaultFs } from '../tools/vault.js';
+import { appendMentionedIn, formatEntityPage } from './entity-templates.js';
 import {
   appendCitedBy,
   appendMemberSource,
@@ -29,6 +30,7 @@ import {
   applyReconcileAndGate,
   isReviewerFailureReason,
   reviewerFailureAttempts,
+  type GatedRecommendations,
 } from './reviewer.js';
 
 /** Sink for unresolved-citation demand (tier 2 of citation completion).
@@ -120,18 +122,14 @@ function sourcePageMatchesArticle(content: string, plan: PlannedArticle): boolea
   return false;
 }
 
-function gateNoteFromStats(gateStats: {
-  foldedSlugs: number;
-  droppedHallucinations: number;
-  rejectedNearDuplicates: number;
-  rejectedThinDefinition: number;
-}): string {
+function gateNoteFromStats(gateStats: GatedRecommendations['gateStats']): string {
   return gateStats.foldedSlugs +
     gateStats.droppedHallucinations +
     gateStats.rejectedNearDuplicates +
-    gateStats.rejectedThinDefinition >
+    gateStats.rejectedThinDefinition +
+    gateStats.fuzzyCorrected >
     0
-    ? ` [gate: fold=${gateStats.foldedSlugs} drop=${gateStats.droppedHallucinations} dup=${gateStats.rejectedNearDuplicates} thin=${gateStats.rejectedThinDefinition}]`
+    ? ` [gate: fold=${gateStats.foldedSlugs} drop=${gateStats.droppedHallucinations} dup=${gateStats.rejectedNearDuplicates} thin=${gateStats.rejectedThinDefinition} fuzzy=${gateStats.fuzzyCorrected}]`
     : '';
 }
 
@@ -188,7 +186,6 @@ async function applyPlannedArticle(
       reviewer: plan.reviewer,
       existingTopicSlugs,
       sourceExists: (filename) => vault.exists(`wiki/sources/${filename}.md`),
-      entityExists: (slug) => vault.exists(`wiki/entities/${slug}.md`),
     });
 
     const memberEntry = {
@@ -200,21 +197,22 @@ async function applyPlannedArticle(
     // 1. Topic-page touches first. Append/create operations are idempotent,
     // and source page creation is saved for last as the completion marker.
     const topicPagePaths: string[] = [];
-    const newTopicsBySlug = new Map(
-      gated.newTopicsToCreate.map((t) => [t.slug, t.definition]),
-    );
+    const newTopicsBySlug = new Map(gated.newTopicsToCreate.map((t) => [t.slug, t]));
     for (const slug of gated.existingTopicSlugs) {
       if (slug === 'uncategorized') continue;
       const topicPath = `wiki/topics/${slug}.md`;
-      const newDef = newTopicsBySlug.get(slug);
-      if (newDef && !(await vault.exists(topicPath))) {
+      const newTopic = newTopicsBySlug.get(slug);
+      if (newTopic && !(await vault.exists(topicPath))) {
         const content = formatTopicPage({
           slug,
           created: new Date(),
           updated: new Date(),
-          definition: newDef,
+          definition: newTopic.definition,
           members: [memberEntry],
           relatedTopics: [],
+          // Soft cluster metadata from birth: an unclustered page born today
+          // is a page nothing can recover clusters for later.
+          clusters: newTopic.clusters,
         });
         await writer.write(topicPath, content);
       } else if (await vault.exists(topicPath)) {
@@ -244,11 +242,36 @@ async function applyPlannedArticle(
     for (const citeFilename of gated.citeFilenames) {
       await backlinkOn(`wiki/sources/${citeFilename}.md`);
     }
-    for (const entitySlug of gated.entitySlugs) {
-      await backlinkOn(`wiki/entities/${entitySlug}.md`);
+
+    // 3. Entity upserts. Unlike cites, a missing entity page is CREATED —
+    //    the reviewer's entity recommendations used to be silently discarded
+    //    whenever the page didn't already exist, so the namespace could never
+    //    grow. Still before the source page: it stays the completion marker.
+    for (const entity of gated.entities) {
+      const entityPath = `wiki/entities/${entity.slug}.md`;
+      const existing = await vault.readOptional(entityPath);
+      if (existing === null) {
+        await writer.write(
+          entityPath,
+          formatEntityPage({
+            slug: entity.slug,
+            name: entity.name,
+            kind: entity.kind,
+            created: new Date(),
+            mentionedIn: [memberEntry],
+          }),
+        );
+        backlinkPagePaths.push(entityPath);
+        continue;
+      }
+      const updated = appendMentionedIn(existing, memberEntry);
+      if (updated !== existing) {
+        await writer.write(entityPath, updated);
+        backlinkPagePaths.push(entityPath);
+      }
     }
 
-    // 3. Source page last: after this point a crash can be treated as a
+    // 4. Source page last: after this point a crash can be treated as a
     // completed write whose DB row may need recovery.
     const unresolved = computeUnresolvedRefs(plan, store);
     const sourceContent = formatSourcePage({
@@ -260,6 +283,10 @@ async function applyPlannedArticle(
       collected: plan.article.collectedAt,
       title: plan.article.title,
       field: plan.article.field,
+      // Shared-pipeline quality signals; omitted entirely for unscored rows so
+      // "unscored" stays distinguishable from "scored low".
+      rigor: plan.article.qualityRigor,
+      evidence: plan.article.qualityEvidence,
       topics: gated.existingTopicSlugs,
       cites: gated.citeFilenames,
       related: gated.relatedFilenames,
@@ -337,17 +364,16 @@ async function previewPlannedArticle(
       reviewer: plan.reviewer,
       existingTopicSlugs,
       sourceExists: (filename) => vault.exists(`wiki/sources/${filename}.md`),
-      entityExists: (slug) => vault.exists(`wiki/entities/${slug}.md`),
     });
 
     const topicPagePaths: string[] = [];
-    const newTopicsBySlug = new Map(gated.newTopicsToCreate.map((t) => [t.slug, t.definition]));
+    const newTopicsBySlug = new Map(gated.newTopicsToCreate.map((t) => [t.slug, t]));
     for (const slug of gated.existingTopicSlugs) {
       if (slug === 'uncategorized') continue;
       const topicPath = `wiki/topics/${slug}.md`;
-      const newDef = newTopicsBySlug.get(slug);
+      const newTopic = newTopicsBySlug.get(slug);
       const existingTopic = await vault.readOptional(topicPath);
-      if (newDef || existingTopic !== null) topicPagePaths.push(topicPath);
+      if (newTopic || existingTopic !== null) topicPagePaths.push(topicPath);
     }
 
     const backlinkPagePaths: string[] = [];
@@ -363,8 +389,21 @@ async function previewPlannedArticle(
     for (const citeFilename of gated.citeFilenames) {
       await backlinkWouldChange(`wiki/sources/${citeFilename}.md`);
     }
-    for (const entitySlug of gated.entitySlugs) {
-      await backlinkWouldChange(`wiki/entities/${entitySlug}.md`);
+    for (const entity of gated.entities) {
+      const entityPath = `wiki/entities/${entity.slug}.md`;
+      const existing = await vault.readOptional(entityPath);
+      if (existing === null) {
+        backlinkPagePaths.push(entityPath); // would be created
+        continue;
+      }
+      const memberEntry = {
+        filename: plan.sourceFilename,
+        title: plan.article.title,
+        collected: plan.article.collectedAt,
+      };
+      if (appendMentionedIn(existing, memberEntry) !== existing) {
+        backlinkPagePaths.push(entityPath);
+      }
     }
 
     const ts = new Date().toISOString().slice(0, 16).replace('T', ' ');

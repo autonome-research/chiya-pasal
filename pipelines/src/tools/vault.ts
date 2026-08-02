@@ -8,7 +8,7 @@
  */
 
 import { promises as fs } from 'fs';
-import { dirname, isAbsolute, join, normalize, relative, resolve } from 'path';
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve } from 'path';
 import { glob } from 'glob';
 import type { ToolRegistry } from 'thread-phase';
 
@@ -73,10 +73,13 @@ export class VaultFs {
     await fs.unlink(this.resolveSafe(path));
   }
 
-  /** Glob within the vault. Returns vault-relative paths. */
+  /** Glob within the vault. Returns vault-relative paths. `_`-prefixed
+   *  basenames are generated artifacts (e.g. wiki/topics/_registry.md) and
+   *  are excluded — a 67KB rendered vocabulary would otherwise sort first
+   *  and eat the scouts' entire keyword-search hit budget. */
   async list(pattern: string): Promise<string[]> {
     const matches = await glob(pattern, { cwd: this.root, nodir: true });
-    return matches.sort();
+    return matches.filter((p) => !basename(p).startsWith('_')).sort();
   }
 
   /** List + read all files matching glob. Useful for focuses/, STATUS.md families. */

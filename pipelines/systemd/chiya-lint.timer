@@ -1,0 +1,14 @@
+[Unit]
+Description=Chiya lint — daily vault reorganization pass
+
+[Timer]
+# 00:15 local: after the day's last digest and off the librarian's :00/:10
+# cadence, so the vault mutation lock is uncontended in the common case.
+OnCalendar=*-*-* 00:15:00
+# Catch up after a reboot or a suspended host — a skipped lint day leaves the
+# registry, index, and graph stale for everything that reads them.
+Persistent=true
+Unit=chiya-lint.service
+
+[Install]
+WantedBy=timers.target

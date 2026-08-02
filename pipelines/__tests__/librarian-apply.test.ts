@@ -326,3 +326,159 @@ describe('applyArticlePlans external references + citation demand (tiers 1-2)', 
     expect(store.getById(citing.id)?.status).toBe('done');
   });
 });
+
+describe('applyArticlePlans entity pages', () => {
+  function withEntities(row: ArticleRow, entities: Array<{ slug: string; why: string; name?: string; kind?: 'organization' | 'person' }>): PlannedArticle {
+    const plan = planned(row);
+    plan.reviewer = { ...plan.reviewer, entities };
+    return plan;
+  }
+
+  it('creates a missing entity page with the mentioning source as first backlink', async () => {
+    const a = insertArticle('Entity paper', 'https://arxiv.org/abs/2607.00001');
+    const plan = withEntities(a, [{ slug: 'anthropic', why: 'central', name: 'Anthropic', kind: 'organization' }]);
+
+    await drain(applyArticlePlans(vault, store).run(ctxWith([{ articleId: a.id, outcome: 'planned', plan }])));
+
+    const page = await vault.read('wiki/entities/anthropic.md');
+    expect(page).toContain('type: entity');
+    expect(page).toContain('kind: organization');
+    expect(page).toContain('# Anthropic');
+    expect(page).toContain('- [[wiki/sources/arxiv-2607-00001]] — Entity paper (2026-05-30)');
+    expect(page).toContain('mentions: 1');
+    // Entity pages are backlink pages; the source page is still written last.
+    expect(store.getById(a.id)?.pagePaths).toContain('wiki/entities/anthropic.md');
+  });
+
+  it('appends to an existing entity page and is idempotent on re-mention', async () => {
+    const a = insertArticle('First entity paper', 'https://arxiv.org/abs/2607.00002');
+    const b = insertArticle('Second entity paper', 'https://arxiv.org/abs/2607.00003');
+    const ent = [{ slug: 'anthropic', why: 'central' }];
+
+    await drain(applyArticlePlans(vault, store).run(ctxWith([
+      { articleId: a.id, outcome: 'planned', plan: withEntities(a, ent) },
+      { articleId: b.id, outcome: 'planned', plan: withEntities(b, ent) },
+    ])));
+
+    const page = await vault.read('wiki/entities/anthropic.md');
+    expect(page).toContain('- [[wiki/sources/arxiv-2607-00002]]');
+    expect(page).toContain('- [[wiki/sources/arxiv-2607-00003]]');
+    expect(page).toContain('mentions: 2');
+
+    // Re-applying the same article (crash recovery replaying a plan) must not
+    // duplicate the backlink.
+    const before = page;
+    await vault.unlink('wiki/sources/arxiv-2607-00003.md');
+    store.markProcessing(b.id);
+    await drain(applyArticlePlans(vault, store).run(ctxWith([
+      { articleId: b.id, outcome: 'planned', plan: withEntities(store.getById(b.id)!, ent) },
+    ])));
+    expect(await vault.read('wiki/entities/anthropic.md')).toBe(before);
+  });
+
+  it('rolls back entity pages created by a failed article apply', async () => {
+    const a = insertArticle('Doomed paper', 'https://arxiv.org/abs/2607.00004');
+    const plan = withEntities(a, [{ slug: 'ephemeral-lab', why: 'central' }]);
+    plan.sourcePath = '../escape.md'; // fails after entity write
+
+    await drain(applyArticlePlans(vault, store).run(ctxWith([{ articleId: a.id, outcome: 'planned', plan }])));
+
+    expect(store.getById(a.id)?.status).toBe('failed');
+    expect(await vault.exists('wiki/entities/ephemeral-lab.md')).toBe(false);
+  });
+
+  it('restores a pre-existing entity page content on rollback', async () => {
+    const a = insertArticle('Doomed paper 2', 'https://arxiv.org/abs/2607.00005');
+    const original = '---\ntype: entity\nmentions: 0\nupdated: 2026-01-01\n---\n\n# Anthropic\n\n## Mentioned in\n\n_None yet._\n';
+    await vault.write('wiki/entities/anthropic.md', original);
+    const plan = withEntities(a, [{ slug: 'anthropic', why: 'central' }]);
+    plan.sourcePath = '../escape.md';
+
+    await drain(applyArticlePlans(vault, store).run(ctxWith([{ articleId: a.id, outcome: 'planned', plan }])));
+
+    expect(await vault.read('wiki/entities/anthropic.md')).toBe(original);
+  });
+
+  it('dry-run reports entity pages it would create without writing them', async () => {
+    const a = insertArticle('Preview entity paper', 'https://arxiv.org/abs/2607.00006');
+    const plan = withEntities(a, [{ slug: 'anthropic', why: 'central' }]);
+    const ctx = ctxWith([{ articleId: a.id, outcome: 'planned', plan }]);
+
+    await drain(applyArticlePlans(vault, store, { dryRun: true }).run(ctx));
+
+    expect(ctx.dryRunPreviews?.[0]?.backlinkPagePaths).toEqual(['wiki/entities/anthropic.md']);
+    expect(await vault.exists('wiki/entities/anthropic.md')).toBe(false);
+  });
+});
+
+describe('applyArticlePlans topic vocabulary handling', () => {
+  it('writes clusters frontmatter on a newly created topic page', async () => {
+    const a = insertArticle('New topic paper', 'https://arxiv.org/abs/2607.00010');
+    const plan = planned(a);
+    plan.reviewer = {
+      topics: [{
+        slug: 'photonic-interconnects',
+        why: 'central',
+        isNew: true,
+        definition: 'Optical links used to move data between chips and racks at low energy per bit.',
+        clusters: ['hardware', 'photonics'],
+      }],
+      cites: [], related: [], entities: [],
+    };
+
+    await drain(applyArticlePlans(vault, store).run(ctxWith([{ articleId: a.id, outcome: 'planned', plan }])));
+
+    const page = await vault.read('wiki/topics/photonic-interconnects.md');
+    expect(page).toContain('clusters: [hardware, photonics]');
+    expect(page).toContain('- [[wiki/sources/arxiv-2607-00010]]');
+  });
+
+  it('fuzzy-corrects a near-miss slug onto the existing topic page', async () => {
+    const a = insertArticle('Typo paper', 'https://arxiv.org/abs/2607.00011');
+    const plan = planned(a);
+    plan.reviewer = { topics: [{ slug: 'llm-evaluations', why: 'plural drift' }], cites: [], related: [], entities: [] };
+
+    const ctx = ctxWith([{ articleId: a.id, outcome: 'planned', plan }]);
+    await drain(applyArticlePlans(vault, store).run(ctx));
+
+    const topic = await vault.read('wiki/topics/llm-evaluation.md');
+    expect(topic).toContain('- [[wiki/sources/arxiv-2607-00011]]');
+    expect(await vault.exists('wiki/topics/llm-evaluations.md')).toBe(false);
+    const page = await vault.read(plan.sourcePath);
+    expect(page).toContain('topics: [llm-evaluation]');
+    expect(ctx.results?.[0]?.logEntry).toContain('fuzzy=1');
+  });
+});
+
+describe('applyArticlePlans quality signals', () => {
+  it('renders rigor/evidence from the routed row, and omits them when unscored', async () => {
+    const scored = store.upsertRouted({
+      title: 'Scored paper',
+      url: 'https://arxiv.org/abs/2607.00020',
+      source: 'arXiv',
+      field: 'AI/ML',
+      summary: '## Overview\nScored.',
+      refsArxiv: [],
+      refsDoi: [],
+      sharedStableId: 'arxiv-2607-00020',
+      routedSimilarity: 0.7,
+      qualityRigor: 4,
+      qualityEvidence: 5,
+    });
+    store.markProcessing(scored.id!);
+    const scoredRow = store.getById(scored.id!)!;
+    const unscored = insertArticle('Unscored paper', 'https://arxiv.org/abs/2607.00021');
+
+    await drain(applyArticlePlans(vault, store).run(ctxWith([
+      { articleId: scoredRow.id, outcome: 'planned', plan: planned(scoredRow) },
+      { articleId: unscored.id, outcome: 'planned', plan: planned(unscored) },
+    ])));
+
+    const scoredPage = await vault.read('wiki/sources/arxiv-2607-00020.md');
+    expect(scoredPage).toContain('rigor: 4');
+    expect(scoredPage).toContain('evidence: 5');
+    const unscoredPage = await vault.read('wiki/sources/arxiv-2607-00021.md');
+    expect(unscoredPage).not.toContain('rigor:');
+    expect(unscoredPage).not.toContain('evidence:');
+  });
+});

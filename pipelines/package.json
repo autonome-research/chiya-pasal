@@ -12,6 +12,7 @@
     "digest:am": "tsx src/digest.ts AM",
     "digest:pm": "tsx src/digest.ts PM",
     "librarian": "tsx src/librarian.ts",
+    "vault-lint": "tsx src/lint.ts",
     "intake": "tsx src/intake.ts",
     "shared": "tsx src/shared-pipeline.ts",
     "doctor": "tsx src/doctor.ts",
@@ -22,6 +23,7 @@
     "backfill-archive-articles": "tsx scripts/backfill-archive-articles.ts",
     "repair-error-summaries": "tsx scripts/repair-error-summaries.ts",
     "migrate-topics": "tsx scripts/migrate-topics.ts",
+    "backfill-topic-clusters": "tsx scripts/backfill-topic-clusters.ts",
     "api-ingest": "tsx src/collection/api-ingest.ts"
   },
   "dependencies": {

@@ -90,6 +90,61 @@ Rules:
 - provide dependency injection seams for tests
 - test truncation, parse failure, empty results, and happy path
 
+## Topic registry and vocabulary
+
+`pipelines/src/shared/topic-registry.ts` owns the vault's topic vocabulary: one scan of `wiki/topics/*.md` produces a `TopicRegistry` value, which is rendered three ways — a human page, a machine document, and a char-budgeted block for agent prompts.
+
+The contract, and who is on each side of it:
+
+| | Writer | Reader |
+|---|---|---|
+| `wiki/topics/_registry.md` | lint `regen-registry` via `renderRegistryMarkdown` | humans only — presentation, not round-trippable, nothing parses it back |
+| `registry.json` (vault root) | lint `regen-registry` via `renderRegistryJson` | `loadTopicRegistry` in `librarian-planner.ts`; future visualization tool |
+| prompt vocabulary block | `vocabularyForPrompt(reg, {maxChars})` | topic-scout (2000 chars) and reviewer (6000 chars) system prompts |
+
+Rules:
+
+- **Topics are flat.** `scanTopicRegistry` reads only `wiki/topics/*.md`, never subdirectories — recursing would reintroduce the slug ambiguity the flattening migration removed. Files starting with `_` are generated artifacts and are skipped so a scan cannot ingest its own output.
+- **Clusters are soft metadata**, multi-valued and overlapping, validated for shape only — never checked against an approved list. The reviewer is the only source of cluster growth for new topics; existing topics get clusters by hand-editing their frontmatter.
+- **Keep `renderRegistryJson`'s shape stable.** `parseRegistryJson` returns `null` on anything unexpected and a parsed-but-empty registry also falls through to a live `scanTopicRegistry`, so a bad emitter degrades to a slower scan instead of blinding the agents. Adding fields is safe; renaming or reshaping `clusters[]` / `topics[]` is not.
+- **`generatedAt` is caller-supplied**, never read from the clock inside the module, so one run stamps every artifact identically and tests are stable.
+- **Vocabulary budget allocation is breadth-first by design.** Every group gets a header and one slug before any group gets a second; leftover budget is distributed round-robin in importance order. A greedy fill would hand the whole budget to the largest cluster and the reviewer would never learn the others exist — which is the blindness the registry exists to fix. The unclustered pile is ranked as a group like any other.
+- **Append the vocabulary to the END of a static system prompt.** The cacheable prefix must stay byte-identical across runs; tests pin this.
+- **`nearestSlugs` proposes; the caller disposes.** Its `MIN_SIMILARITY` floor is recall-first. Every consumer adds its own acceptance gate: the reviewer's fuzzy correction requires `isNearDuplicate` or a length-scaled edit budget; the lint duplicate report compares only the tokens two slugs do *not* share. Don't lower the floor to make a consumer happier — tighten the consumer's gate.
+- If you need a registry-derived value in a pipeline that already walks the vault, build the `TopicRegistry` from `parseTopicPage` + `readFrontmatterList` rather than calling `scanTopicRegistry` (which re-reads every member source to derive `citedByTotal`). Render through the same `render*` functions so output stays identical.
+
+## Lint passes
+
+The lint pipeline (`pipelines/src/lint.ts`, phases in `pipelines/src/phases/lint-phases.ts`) is the vault's "organize" organ: deterministic TypeScript only, no LLM. `scan-vault` runs first and is the only reader of page bodies; every later pass works off `LintCtx`.
+
+To add a pass:
+
+```ts
+export const myPass = (vault: VaultFs): Phase<LintCtx> => ({
+  name: 'my-pass',
+  async *run(ctx) {
+    const sources = requireCtx(ctx, 'sources', 'my-pass');   // fail loudly on bad phase order
+    const outcome = await planWrite(ctx, vault, 'some/path.md', rendered);
+    ctx.stats.myPassChanged = outcome === 'unchanged' ? 0 : 1;
+    yield { type: 'phase', phase: 'my-pass', detail: `some/path.md: ${outcome}`, counts: { … } };
+  },
+});
+```
+
+Then register it in the `mutating` array in `lint.ts` — order matters, and `commit-lint` must stay last.
+
+Rules:
+
+- **Every write goes through `planWrite`.** It content-compares first and returns `unchanged` / `written` / `would-write`, and it is the only thing that honours `ctx.dryRun`. A pass that calls `vault.write` directly breaks dry-run *and* makes the daily timer churn git history on an unchanged vault.
+- **Don't re-walk the vault.** If your pass needs a field the scan doesn't collect, add it to `LintSourceRecord` / `LintTopicPage` and populate it in `scan-vault`. A second walk over 21.9k files costs more than the extra bytes.
+- **Rewrite lines, don't regenerate pages.** `recount-citations` replaces one frontmatter line via `bumpFrontmatterField`; `rank-topic-members` writes sorted lines back into the exact indices they occupied. A pass that reformats a page it did not author will silently destroy hand-written content — refuse and count instead (`rerankMemberSection` returns `unparseable`).
+- **Reporting is not acting.** Phase A lint deletes, merges, and archives nothing. Judgment-driven cleanup belongs to a later phase and must still arrive as LLM proposals disposed of by deterministic code.
+- **Cap what rides the event stream.** Full lists go out as `{type:'data'}` events truncated at `MAX_REPORT_ITEMS` with `truncatedAt` in the payload; counts stay exact. The job store persists every event and the live vault produces five-figure lists.
+- **Call `ctx.heartbeat?.()` inside long loops** (every `HEARTBEAT_EVERY` files) or a slow run gets reclaimed as abandoned mid-flight.
+- **Anything touching the working tree runs under `VaultMutationLock`** — that is why only `scan-vault` sits outside it in `lint.ts`. Dry-run skips the lock because it writes nothing.
+- **Filter pathspecs before staging.** `git add -- CLAUDE.md` fails outright on a vault without that file, which would abort the run; `commit-lint` checks existence first.
+- **Test with tmp-dir fixtures**, not the live vault, and pin both the changed and unchanged outcomes — "an unchanged vault produces zero writes" is a behavior, not an implementation detail.
+
 ## Changing vault writes
 
 Vault writes happen in `librarian-apply.ts` and digest `publish.ts`.
@@ -99,8 +154,10 @@ Rules:
 - all paths go through `VaultFs`
 - librarian planning must not write files or update article status
 - apply plans serially and revalidate against fresh vault state
-- write source pages last as completion markers
+- write source pages last as completion markers (entity upserts sit between topic touches and the source write, and go through the same per-article writer log so rollback removes created entity pages)
 - run cross-pipeline mutation sections under `VaultMutationLock`
+- never write `index.md`, `registry.json`, `graph.json`, or `wiki/topics/_registry.md` from anywhere but the lint pass — they are regenerated wholesale, so any other writer's changes are lost on the next run
+- keep frontmatter to single-level scalars and one-line inline arrays; every mutator in the repo is line-based and nested YAML will not round-trip
 
 ## Safety checklist
 

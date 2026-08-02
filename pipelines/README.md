@@ -13,10 +13,11 @@ tenants from `config/users.yaml`.
 |---|---|---|
 | `shared` | live (routing mode: broadcast until the embedding service returns) | every 30 min |
 | `librarian` | live, multi-tenant (router → scouts → reviewer → serial apply per user) | every 10 min |
+| `lint` | multi-tenant, deterministic (regenerate derived views, recount citations, report structure). Units written, **not yet enabled** | daily 00:15 local |
 | `digest` | live, multi-tenant | 06:30 / 18:30 local |
 | `intake` | retired — absorbed into the shared pipeline | — |
 
-511 tests, all green. `npm test`, `npm run build`.
+`npm test`, `npm run build`. The full suite is the merge gate.
 
 ## Setup
 
@@ -64,6 +65,8 @@ npm run intake                    # tsx src/intake.ts
 npm run librarian                 # tsx src/librarian.ts
 npm run librarian -- --dry-run    # calls agents + previews apply; no vault/git/article status mutation
 npm run librarian -- --plan-only  # stops after semantic article plans; no apply preview
+npx tsx src/lint.ts               # deterministic vault reorganization pass (all enabled users)
+npx tsx src/lint.ts --user velvet --dry-run   # reports every would-write; no vault/git mutation
 npm run digest:am                 # tsx src/digest.ts AM
 npm run digest:pm                 # tsx src/digest.ts PM
 npm run backfill-archive-articles -- --status=done     # recover dedup memory after DB loss
@@ -81,6 +84,8 @@ ln -sf ~/chiya-library/pipelines/systemd/chiya-shared.service      ~/.config/sys
 ln -sf ~/chiya-library/pipelines/systemd/chiya-shared.timer        ~/.config/systemd/user/
 ln -sf ~/chiya-library/pipelines/systemd/chiya-librarian.service   ~/.config/systemd/user/
 ln -sf ~/chiya-library/pipelines/systemd/chiya-librarian.timer     ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-lint.service        ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-lint.timer          ~/.config/systemd/user/
 ln -sf ~/chiya-library/pipelines/systemd/chiya-digest@.service     ~/.config/systemd/user/
 ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-am.timer     ~/.config/systemd/user/
 ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-pm.timer     ~/.config/systemd/user/
@@ -96,6 +101,13 @@ systemctl --user enable --now \
 systemctl --user list-timers chiya-*
 ```
 
+`chiya-lint.timer` is deliberately left out of that `enable --now` list: the first
+apply run stamps `cited_by:` onto ~21.8k legacy source pages in one commit, so it
+should be run by hand (after `--dry-run`) before the timer takes over. Enable it with
+`systemctl --user enable --now chiya-lint.timer` once that has happened. Its
+`TimeoutStartSec=5400` is sized for that one-off; steady-state runs are ~12s and write
+nothing.
+
 Every pipeline service has `ExecStartPre=npm rebuild better-sqlite3` so a silent Node ABI bump can't break the DB binding. Roughly 1s when already-current, ~30s when actually rebuilding.
 
 Legacy units still in `systemd/` but not installed: `chiya-intake.{service,timer}` (intake is retired — absorbed into the shared pipeline) and `chiya-embed.service` (kubectl port-forward for the embedding endpoint; only needed when `CHIYA_ROUTING_MODE=embedding` and the embed service is back).
@@ -104,6 +116,7 @@ Manual triggers:
 ```bash
 systemctl --user start chiya-shared.service
 systemctl --user start chiya-librarian.service
+systemctl --user start chiya-lint.service
 systemctl --user start chiya-digest@AM.service
 journalctl --user -u chiya-librarian.service -f
 ```
@@ -173,7 +186,35 @@ mergeMetadata       (pure)   append per-article entries to vault/log.md
 commitLocal         (pure)   single git commit per run (no push — digest pushes)
 ```
 
-Enrichment, reference extraction, and summarization all happen upstream in the shared pipeline: the article body the planner sees IS the pre-computed rich summary (`snippet` column), and refs arrive in dedicated columns (regex fallback only for legacy rows). Per-article planning wall: ~40-70s (6 LLM calls). Batch=10 + planning concurrency=4 fits in the 8-min in-pipeline deadline + 20-min systemd hard kill. Vault/DB writes are then applied serially to avoid lost updates on shared topic/backlink pages. New topic proposals are reconciled against both existing topics and other new proposals in the same reviewer output, so near-duplicates collapse before page creation. Reviewer-approved related sources are rendered as source-page frontmatter (`related: [...]`) and a `## Related sources` wikilink section. Unresolved cites render as `## External references` (cap 10) on the source page and are recorded in the shared citation-demand ledger only after the source page is durably written. The apply/metadata/commit block runs under a cross-process vault mutation lock shared with digest publishing.
+Enrichment, reference extraction, and summarization all happen upstream in the shared pipeline: the article body the planner sees IS the pre-computed rich summary (`snippet` column), and refs arrive in dedicated columns (regex fallback only for legacy rows). Per-article planning wall: ~40-70s (6 LLM calls). Batch=10 + planning concurrency=4 fits in the 8-min in-pipeline deadline + 20-min systemd hard kill. Vault/DB writes are then applied serially to avoid lost updates on shared topic/backlink pages. Each run loads the vault's topic vocabulary once — the lint pipeline's `registry.json` when present, else a live `scanTopicRegistry` — and appends a cluster-grouped, char-budgeted slug block to the topic-scout (2000 chars) and reviewer (6000 chars) system prompts, so the reviewer assigns topics against a vocabulary it can actually see rather than inventing slugs that fall through to `uncategorized`. New topic proposals are reconciled against both existing topics and other new proposals in the same reviewer output, so near-duplicates collapse before page creation; a proposed slug that is a typo or plural variant of a real one is snapped onto the real one instead of being dropped. New topic pages are born with the reviewer's `clusters:` frontmatter, and reviewer-approved entities are upserted into `wiki/entities/` (created on first mention, appended idempotently after). Reviewer-approved related sources are rendered as source-page frontmatter (`related: [...]`) and a `## Related sources` wikilink section. Unresolved cites render as `## External references` (cap 10) on the source page and are recorded in the shared citation-demand ledger only after the source page is durably written. The apply/metadata/commit block runs under a cross-process vault mutation lock shared with digest publishing.
+
+### lint.ts
+
+The vault's "organize" organ. Multi-tenant, same shape as `librarian.ts`: one sequential run per enabled user, each under its own job lock (`chiya-lint:<handle>`), `--user <handle>` (or `--user=<handle>`) restricts to one tenant, one tenant's failure never blocks the fleet. **Every pass is deterministic — no LLM is contacted anywhere in this pipeline**, so it runs regardless of whether the inference tunnel is up. Judgment-driven cleanup (merges, deletions, archiving) is a later phase and will still land as agent proposals for deterministic code to dispose of.
+
+```
+scanVault           (pure)   one walk of wiki/sources + wiki/topics + wiki/entities into
+                              LintCtx: frontmatter, wikilinks, member lists, cite in-degree.
+                              The only reader of page bodies; every later pass works off ctx
+regenRegistry       (pure)   wiki/topics/_registry.md (human) + registry.json (machine —
+                              this is the vocabulary the librarian's agents read)
+recountCitations    (pure)   cited_by: ← inbound `cites:` edges, one frontmatter line
+                              rewritten in place; rest of the page byte-for-byte identical
+rankTopicMembers    (pure)   `## Member sources` re-sorted by (cited_by desc, collected desc)
+                              into the exact line slots it occupied
+regenIndex          (pure)   index.md as a NAVIGATION surface (clusters → top topics, other
+                              page families, recent sources, stats) — never a 21.8k-page catalog
+exportGraph         (pure)   graph.json: nodes (source/topic/entity/cluster) + edges
+                              (member/cites/related/mentions) for the visualization tool
+reportLint          (pure)   broken links / orphan sources / stub topics / near-duplicate
+                              topic slugs. REPORT ONLY — summary line to log.md, full lists
+                              on the event stream (capped at 2000 items/category)
+commitLint          (pure)   one commit per run, pathspecs filtered to what exists
+```
+
+Every write goes through `planWrite`, which content-compares first: a run over an unchanged vault produces zero writes and `commitLint` short-circuits before touching git, so a daily timer cannot churn history or mtimes. `scanVault` is read-only and runs outside the lock; the seven mutating passes (plus `log.md` and the commit) run inside `VaultMutationLock`. `--dry-run` reports every would-write and the full report without touching the vault, log.md, or git — and skips the lock, since it writes nothing. Live measurements on the 21.9k-source velvet vault: full pipeline ~12s, of which the scan is 0.3s and a worst-case (every page stale) recount is 11s; `ctx.heartbeat()` fires every 500 files inside the scan and recount loops so long runs are not reclaimed as abandoned.
+
+The first apply run is the expensive one: ~21.8k legacy source pages have no `cited_by:` key at all and each gains one, in a single commit. Run `--dry-run` first.
 
 ### digest.ts
 

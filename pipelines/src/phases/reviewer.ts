@@ -23,8 +23,16 @@ import {
   valid,
   type Validator,
 } from '../shared/llm-schema.js';
+import {
+  isKnownSlug,
+  nearestSlugs,
+  type TopicRecord,
+  type TopicRegistry,
+} from '../shared/topic-registry.js';
 import type { VaultFs } from '../tools/vault.js';
 import { registerReadOnlyVaultTools } from '../tools/vault.js';
+import { asEntityKind, sanitizeSlug, type EntityKind } from './entity-templates.js';
+import { UNCATEGORIZED_TOPIC } from './page-templates.js';
 import type { ScoutOutput, SurfacedPage } from './scouts/types.js';
 import {
   isNearDuplicate,
@@ -40,6 +48,10 @@ export interface ReviewerInput {
   sourceScout: ScoutOutput;
   entityScout: ScoutOutput;
   citeTracker: ScoutOutput;
+  /** Cluster-grouped slug inventory rendered ONCE per librarian run
+   *  (vocabularyForPrompt). Absent means "no registry available" — the
+   *  reviewer then works blind, as it did before the registry existed. */
+  vocabulary?: string;
 }
 
 export interface ReviewerClients {
@@ -56,6 +68,11 @@ export interface ReviewerTopic {
    *  can apply isSubstantiveDefinition. */
   isNew?: boolean;
   definition?: string;
+  /** Soft cluster memberships for a NEW topic, chosen from the registry's
+   *  cluster names. Validated for shape only, never for membership: the
+   *  cluster vocabulary has to be able to grow, and 55% of live topics carry
+   *  no cluster at all. Ignored for existing topics (the page owns its own). */
+  clusters?: string[];
 }
 
 export interface ReviewerCite {
@@ -73,6 +90,10 @@ export interface ReviewerEntity {
   /** Vault filename WITHOUT the wiki/entities/ prefix and WITHOUT .md. */
   slug: string;
   why: string;
+  /** Display name for a page that does not exist yet. */
+  name?: string;
+  /** person | organization | product | tool | other; anything else → omitted. */
+  kind?: EntityKind;
 }
 
 export interface ReviewerOutput {
@@ -122,21 +143,25 @@ export interface GatedRecommendations {
   /** Existing-topic slugs the article gets filed under. */
   existingTopicSlugs: string[];
   /** New-topic proposals that PASSED the gate. Each will get a fresh topic
-   *  page created by the librarian. */
-  newTopicsToCreate: Array<{ slug: string; definition: string }>;
+   *  page created by the librarian, carrying the reviewer's clusters. */
+  newTopicsToCreate: Array<{ slug: string; definition: string; clusters: string[] }>;
   /** Cite filenames whose source pages exist in the vault. */
   citeFilenames: string[];
-  /** Entity slugs whose pages exist in the vault. */
-  entitySlugs: string[];
+  /** Entities to upsert. NOT filtered by existence: a missing page is created
+   *  with this article as its first backlink (apply decides create vs append
+   *  against fresh vault state). */
+  entities: Array<{ slug: string; name: string | null; kind: EntityKind | null }>;
   /** Related-source filenames whose pages exist; rendered on the new source page
    *  as frontmatter graph edges plus a "## Related sources" section. */
   relatedFilenames: string[];
-  /** Diagnostic: counts of what got dropped at each gate. */
+  /** Diagnostic: counts of what got dropped (or repaired) at each gate. */
   gateStats: {
     foldedSlugs: number;
     droppedHallucinations: number;
     rejectedNearDuplicates: number;
     rejectedThinDefinition: number;
+    /** Unknown slugs snapped onto an existing one before reconcile. */
+    fuzzyCorrected: number;
   };
 }
 
@@ -164,20 +189,47 @@ POLICIES:
    - A lowercase-hyphen slug (no spaces)
    - A 1-2 sentence definition that would be true 5 years from now (a research area, not a paper title)
    - Genuine novelty (the topicScout didn't surface anything close)
+   - "clusters": 1-2 cluster names taken from the vocabulary block below (or [] if none fit). Clusters are soft, overlapping labels — never a hierarchy.
 
 3. CITE-TRACKER IS AUTHORITATIVE on cites. If the cite-tracker surfaced 4 pages, your cites list is some subset of those 4. Don't add cites the cite-tracker didn't find.
 
 4. EVERY ARTICLE MUST HAVE AT LEAST ONE topic slug. If nothing fits and no new topic is justified, use "uncategorized" as the slug.
 
+5. ENTITIES ARE PAGES. An entity you recommend gets a wiki/entities page — created if it doesn't exist yet, with this article as its first backlink. So use a canonical lowercase-hyphen slug ("anthropic", not "Anthropic Inc."), and only name entities the article is substantively about.
+
 OUTPUT (JSON only, no preamble, no code fences):
 {
-  "topics":   [{ "slug": "existing-or-new-slug", "why": "1 sentence", "isNew": true_if_new, "definition": "1-2 sentences (only if isNew)" }],
+  "topics":   [{ "slug": "existing-or-new-slug", "why": "1 sentence", "isNew": true_if_new, "definition": "1-2 sentences (only if isNew)", "clusters": ["cluster-name"] }],
   "cites":    [{ "filename": "arxiv-2403-12345", "why": "1 sentence" }],
   "related":  [{ "filename": "arxiv-2604-25099", "why": "1 sentence" }],
-  "entities": [{ "slug": "anthropic", "why": "1 sentence" }]
+  "entities": [{ "slug": "anthropic", "name": "Anthropic", "kind": "organization", "why": "1 sentence" }]
 }
 
-The "why" fields are for the audit trail and the librarian's logs; keep them short.`;
+"kind" is one of person, organization, product, tool, other. The "why" fields are for the audit trail and the librarian's logs; keep them short.`;
+
+/** Heading the run-level topic vocabulary is injected under. Exported so the
+ *  planner/tests can assert the reviewer actually sees the vocabulary — the
+ *  blindness this fixes is what produced 57% `uncategorized` sources. */
+export const REVIEWER_VOCABULARY_HEADING =
+  '## Existing topic vocabulary (assign to these when applicable; propose new only when nothing fits)';
+
+/**
+ * System prompt for one librarian run. The vocabulary block is appended (not
+ * interleaved) so the static policy prefix stays byte-identical across runs
+ * for prompt caching, and it is rendered once per run rather than per article.
+ */
+export function buildReviewerSystemPrompt(vocabulary?: string): string {
+  const vocab = vocabulary?.trim();
+  if (!vocab) return REVIEWER_SYSTEM;
+  return (
+    `${REVIEWER_SYSTEM}\n\n${REVIEWER_VOCABULARY_HEADING}\n\n` +
+    'Each line is "cluster (topic count): slugs". Every slug listed EXISTS — use it verbatim. ' +
+    '"(+N more)" means that cluster\'s list was elided to fit, so absence from this block is weak ' +
+    'evidence; the topicScout\'s findings are authoritative for pages it actually read. ' +
+    'Cluster names on the left are the vocabulary for the "clusters" field of a new topic.\n\n' +
+    vocab
+  );
+}
 
 const BODY_CAP = 4000;
 
@@ -249,9 +301,10 @@ export async function runReviewerWith(
   registerReadOnlyVaultTools(registry, vault);
 
   const userMessage = buildUserMessage(input);
+  const systemPrompt = buildReviewerSystemPrompt(input.vocabulary);
   let r: { text: string; finishReason: string; toolRounds: number };
   try {
-    r = await agentFn(REVIEWER_SYSTEM, userMessage, registry, clients, signal);
+    r = await agentFn(systemPrompt, userMessage, registry, clients, signal);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
@@ -320,6 +373,24 @@ function isStr(x: unknown): x is string {
   return typeof x === 'string' && x.trim().length > 0;
 }
 
+const MAX_CLUSTERS_PER_TOPIC = 2;
+
+/** Cluster names are shape-validated only (never checked against the registry):
+ *  the cluster vocabulary must be able to grow, since history recovery cannot
+ *  cluster the 1.4k topics that were born flat. */
+function sanitizeClusters(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const c of raw) {
+    if (typeof c !== 'string') continue;
+    const slug = sanitizeSlug(c);
+    if (!slug || out.includes(slug)) continue;
+    out.push(slug);
+    if (out.length >= MAX_CLUSTERS_PER_TOPIC) break;
+  }
+  return out;
+}
+
 function sanitizeTopics(raw: unknown): ReviewerTopic[] {
   if (!Array.isArray(raw)) return [];
   const out: ReviewerTopic[] = [];
@@ -327,10 +398,20 @@ function sanitizeTopics(raw: unknown): ReviewerTopic[] {
     if (!e || typeof e !== 'object') continue;
     const o = e as Record<string, unknown>;
     if (!isStr(o.slug) || !isStr(o.why)) continue;
+    // Slugs become file paths; sanitize at the LLM boundary so nothing
+    // downstream has to defend against spaces or traversal.
+    const slug = sanitizeSlug(o.slug);
+    if (!slug) continue;
     const isNew = o.isNew === true;
     const definition = isStr(o.definition) ? o.definition : undefined;
     if (isNew && !definition) continue; // new topic without a definition can't be gated
-    out.push({ slug: o.slug.trim(), why: o.why.trim(), isNew: isNew || undefined, definition });
+    out.push({
+      slug,
+      why: o.why.trim(),
+      isNew: isNew || undefined,
+      definition,
+      clusters: isNew ? sanitizeClusters(o.clusters) : undefined,
+    });
     if (out.length >= MAX_TOPICS) break;
   }
   return out;
@@ -369,7 +450,15 @@ function sanitizeEntities(raw: unknown): ReviewerEntity[] {
     if (!e || typeof e !== 'object') continue;
     const o = e as Record<string, unknown>;
     if (!isStr(o.slug) || !isStr(o.why)) continue;
-    out.push({ slug: o.slug.trim(), why: o.why.trim() });
+    const slug = sanitizeSlug(o.slug);
+    if (!slug) continue;
+    const kind = asEntityKind(o.kind);
+    out.push({
+      slug,
+      why: o.why.trim(),
+      name: isStr(o.name) ? o.name.trim().slice(0, 120) : undefined,
+      kind: kind ?? undefined,
+    });
     if (out.length >= MAX_ENTITIES) break;
   }
   return out;
@@ -388,25 +477,126 @@ export interface GateInputs {
   /** Predicate: does wiki/sources/{filename}.md exist? Used to filter cites
    *  and related references. */
   sourceExists: (filename: string) => boolean | Promise<boolean>;
-  /** Predicate: does wiki/entities/{slug}.md exist? */
-  entityExists: (slug: string) => boolean | Promise<boolean>;
+}
+
+/**
+ * Number of fuzzy candidates considered per unknown slug. `nearestSlugs`
+ * proposes (recall); `isNearDuplicate` disposes (precision) — the same
+ * detector the new-topic gate uses, so a slug can never be corrected onto
+ * something the gate would have called distinct.
+ */
+const FUZZY_CANDIDATES = 3;
+
+/** Minimal TopicRecord so the registry lookups can run against the slug set
+ *  apply just read from disk. The run-level registry tells the AGENTS what
+ *  exists; the gate must be right about what exists NOW, and a scan-fresh
+ *  slug set is the only source of that truth. */
+function registryOfSlugs(slugs: ReadonlySet<string>): TopicRegistry {
+  const topics: TopicRecord[] = [...slugs].sort().map((slug) => ({
+    slug,
+    title: slug,
+    oneLiner: null,
+    clusters: [],
+    memberCount: 0,
+    citedByTotal: 0,
+    updated: null,
+  }));
+  return { topics, clusters: {}, generatedAt: '' };
+}
+
+/** Edit budget for accepting a correction, scaled by slug length. Slugs
+ *  shorter than this never correct on distance alone: at 5 characters one
+ *  edit is the difference between `gpt-4` and `gpt-5`. */
+const MIN_FUZZY_SLUG_LEN = 8;
+const MAX_FUZZY_EDITS = 3;
+
+/** Local copy: topic-registry owns the scoring used to RANK candidates, this
+ *  module owns the threshold used to ACCEPT one, and the two are tuned
+ *  independently (ranking is generous by design). */
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  let cur = new Array<number>(b.length + 1);
+  for (let i = 1; i <= a.length; i++) {
+    cur[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + cost);
+    }
+    [prev, cur] = [cur, prev];
+  }
+  return prev[b.length]!;
+}
+
+function withinEditBudget(a: string, b: string): boolean {
+  const maxLen = Math.max(a.length, b.length);
+  if (maxLen < MIN_FUZZY_SLUG_LEN) return false;
+  return levenshtein(a, b) <= Math.min(MAX_FUZZY_EDITS, Math.ceil(maxLen / 6));
+}
+
+/**
+ * `nearestSlugs` proposes; this disposes. A candidate is only accepted when it
+ * is either a near-duplicate by the new-topic gate's own rule (so correction
+ * can never contradict the gate) or within a length-scaled edit budget, which
+ * is what catches the typo/plural drift the gate's prefix rule misses
+ * ('quantum-sesning' → 'quantum-sensing').
+ */
+function correctToKnownSlug(reg: TopicRegistry, slug: string): string | null {
+  // The length floor guards BOTH acceptance branches: isNearDuplicate's
+  // prefix rule has no floor of its own, and at short lengths it folds
+  // distinct model names ('gpt-4' → 'gpt-4o') — exactly the confusion
+  // MIN_FUZZY_SLUG_LEN exists to prevent.
+  if (slug.length < MIN_FUZZY_SLUG_LEN) return null;
+  for (const candidate of nearestSlugs(reg, slug, FUZZY_CANDIDATES)) {
+    if (!isKnownSlug(reg, candidate)) continue;
+    if (isNearDuplicate(slug, new Set([candidate])).duplicate) return candidate;
+    if (withinEditBudget(slug.toLowerCase(), candidate.toLowerCase())) return candidate;
+  }
+  return null;
 }
 
 export async function applyReconcileAndGate(input: GateInputs): Promise<GatedRecommendations> {
+  // 0. Fuzzy correction. A slug the vault doesn't know but that is one typo /
+  //    plural / word-order away from one it does used to be dropped as a
+  //    hallucination (or rejected as a near-duplicate new topic) and the
+  //    article fell through to 'uncategorized'. Snap it instead. Genuinely
+  //    novel slugs are left untouched for the new-topic path below.
+  let fuzzyCorrected = 0;
+  // Built lazily: most articles propose only slugs that already match, and
+  // materializing the vault's whole slug namespace per article is wasted work
+  // when nothing needs correcting.
+  let slugRegistry: TopicRegistry | null = null;
+  const topics: ReviewerTopic[] = input.reviewer.topics.map((t) => {
+    if (t.slug === UNCATEGORIZED_TOPIC || input.existingTopicSlugs.has(t.slug)) return t;
+    slugRegistry ??= registryOfSlugs(input.existingTopicSlugs);
+    const corrected = correctToKnownSlug(slugRegistry, t.slug);
+    if (!corrected) return t;
+    fuzzyCorrected++;
+    // Now an existing page: it owns its own definition and clusters.
+    return { slug: corrected, why: t.why };
+  });
+
   // 1. Topic reconcile (fold false-new + drop hallucinations) using the
   //    existing reconciler shape. Build a TopicOutput from reviewer.topics.
   const topicOut: TopicOutput = {
     decisions: [
-      { i: 0, topics: input.reviewer.topics.map((t) => t.slug) },
+      { i: 0, topics: topics.map((t) => t.slug) },
     ],
-    newTopics: input.reviewer.topics
+    newTopics: topics
       .filter((t) => t.isNew && t.definition)
-      .map((t) => ({ slug: t.slug, definition: t.definition!, members: [0] })),
+      .map((t) => ({
+        slug: t.slug,
+        definition: t.definition!,
+        members: [0],
+        clusters: t.clusters ?? [],
+      })),
   };
   const reconciled = reconcileTopicOutput(topicOut, input.existingTopicSlugs);
 
   // 2. New-topic gate: drop near-duplicates + thin definitions.
-  const newTopicsToCreate: Array<{ slug: string; definition: string }> = [];
+  const newTopicsToCreate: GatedRecommendations['newTopicsToCreate'] = [];
   let rejectedNearDuplicates = 0;
   let rejectedThinDefinition = 0;
   for (const proposal of reconciled.reconciled.newTopics) {
@@ -419,7 +609,11 @@ export async function applyReconcileAndGate(input: GateInputs): Promise<GatedRec
       rejectedThinDefinition++;
       continue;
     }
-    newTopicsToCreate.push({ slug: proposal.slug, definition: proposal.definition });
+    newTopicsToCreate.push({
+      slug: proposal.slug,
+      definition: proposal.definition,
+      clusters: proposal.clusters ?? [],
+    });
   }
   const passedNewSlugs = new Set(newTopicsToCreate.map((t) => t.slug));
 
@@ -438,14 +632,17 @@ export async function applyReconcileAndGate(input: GateInputs): Promise<GatedRec
     ? finalSlugs
     : ['uncategorized'];
 
-  // 4. Cite + entity + related existence checks against the vault.
+  // 4. Cite + related existence checks against the vault. Entities are NOT
+  //    existence-filtered — apply upserts them, creating the page when the
+  //    library meets the entity for the first time.
   const citeFilenames: string[] = [];
   for (const c of input.reviewer.cites) {
     if (await input.sourceExists(c.filename)) citeFilenames.push(c.filename);
   }
-  const entitySlugs: string[] = [];
+  const entities: GatedRecommendations['entities'] = [];
   for (const e of input.reviewer.entities) {
-    if (await input.entityExists(e.slug)) entitySlugs.push(e.slug);
+    if (entities.some((x) => x.slug === e.slug)) continue;
+    entities.push({ slug: e.slug, name: e.name ?? null, kind: e.kind ?? null });
   }
   const relatedFilenames: string[] = [];
   for (const r of input.reviewer.related) {
@@ -456,13 +653,14 @@ export async function applyReconcileAndGate(input: GateInputs): Promise<GatedRec
     existingTopicSlugs,
     newTopicsToCreate,
     citeFilenames,
-    entitySlugs,
+    entities,
     relatedFilenames,
     gateStats: {
       foldedSlugs: reconciled.foldedSlugs.length,
       droppedHallucinations: reconciled.droppedHallucinations.length,
       rejectedNearDuplicates,
       rejectedThinDefinition,
+      fuzzyCorrected,
     },
   };
 }

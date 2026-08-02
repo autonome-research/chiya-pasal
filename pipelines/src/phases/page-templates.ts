@@ -44,6 +44,15 @@ export interface SourcePageInput {
   /** Cited references not (yet) in the library. Omitted section when empty. */
   externalRefs?: ExternalRef[];
   summary: string;
+  /**
+   * Shared-pipeline quality assessment, projected into frontmatter as the
+   * page's rigor/evidence signals. Undefined (the default) or null means the
+   * article was never scored — the lines are omitted entirely rather than
+   * rendered as a fake zero, so a downstream reader can tell "unscored" from
+   * "scored low".
+   */
+  rigor?: number | null;
+  evidence?: number | null;
 }
 
 export interface TopicPageInput {
@@ -165,8 +174,18 @@ export function formatSourcePage(input: SourcePageInput): string {
     `collected: ${collectedYmd}`,
     `title: ${yamlString(input.title)}`,
     `field: ${fieldLabel}`,
+  );
+  if (input.rigor !== undefined && input.rigor !== null) fmLines.push(`rigor: ${input.rigor}`);
+  if (input.evidence !== undefined && input.evidence !== null) {
+    fmLines.push(`evidence: ${input.evidence}`);
+  }
+  fmLines.push(
     `topics: ${yamlInlineArray(input.topics)}`,
     `cites: ${yamlInlineArray(input.cites)}`,
+    // Citation in-degree, born at 0 and maintained by the citation lint pass.
+    // Present from birth so the lint pass can bump it in place instead of
+    // rewriting frontmatter shape on 21.8k existing pages.
+    'cited_by: 0',
     `related: ${yamlInlineArray(related)}`,
     '---',
   );

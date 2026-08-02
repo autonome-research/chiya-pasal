@@ -6,7 +6,9 @@ import type OpenAI from 'openai';
 
 import { VaultFs } from '../../src/tools/vault.js';
 import {
+  buildTopicScoutSystemPrompt,
   runTopicScoutWith,
+  SCOUT_VOCABULARY_HEADING,
   type ScoutAgentFn,
   type TopicScoutClients,
   type TopicScoutInput,
@@ -238,5 +240,30 @@ describe('runTopicScoutWith — telemetry passthrough', () => {
 
     const result = await runTopicScoutWith(makeInput(), makeClients(), vault, undefined, agentFn);
     expect(result.toolRounds).toBe(7);
+  });
+});
+
+describe('runTopicScoutWith — topic vocabulary', () => {
+  const VOCAB = 'ai-ml (2): llm-evaluation, transformers (+3 more)\nphysics (1): quantum-sensing';
+
+  it('injects the run vocabulary into the system prompt', async () => {
+    let seenSystem = '';
+    const agentFn: ScoutAgentFn = async (system) => {
+      seenSystem = system;
+      return { text: JSON.stringify({ surfacedPages: [] }), finishReason: 'stop', toolRounds: 0 };
+    };
+
+    await runTopicScoutWith(makeInput({ vocabulary: VOCAB }), makeClients(), vault, undefined, agentFn);
+
+    expect(seenSystem).toContain(SCOUT_VOCABULARY_HEADING);
+    expect(seenSystem).toContain('llm-evaluation');
+    expect(seenSystem).toContain('quantum-sensing');
+  });
+
+  it('keeps the static policy prefix byte-identical when no vocabulary is available', () => {
+    const bare = buildTopicScoutSystemPrompt(undefined);
+    expect(bare).not.toContain(SCOUT_VOCABULARY_HEADING);
+    expect(buildTopicScoutSystemPrompt('  ')).toBe(bare);
+    expect(buildTopicScoutSystemPrompt(VOCAB).startsWith(bare)).toBe(true);
   });
 });

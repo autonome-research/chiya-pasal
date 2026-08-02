@@ -142,7 +142,7 @@ export const commitLocal = (git: GitOps): Phase<LibrarianCtx> => ({
       { done: 0, skipped: 0, failed: 0 } as Record<string, number>,
     );
     const message = `ingest: ${results.length} articles (${tally.done} done, ${tally.skipped} skipped, ${tally.failed} failed)`;
-    const result = await git.commit(message, ['log.md', 'wiki/sources/', 'wiki/topics/']);
+    const result = await git.commit(message, ['log.md', 'wiki/sources/', 'wiki/topics/', 'wiki/entities/']);
     yield {
       type: 'agent_activity',
       agent: 'commit-local',

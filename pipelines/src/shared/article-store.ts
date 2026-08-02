@@ -39,6 +39,11 @@ export interface ArticleRow {
   sharedStableId: string | null;
   /** Cosine similarity at routing time; null when not routed. */
   routedSimilarity: number | null;
+  /** Quality scores from the shared summarize phase, carried through the
+   *  route copy so the librarian and the wiki can see them. Null on legacy
+   *  rows and on anything that never passed through the shared pipeline. */
+  qualityRigor: number | null;
+  qualityEvidence: number | null;
 }
 
 export interface ArticleInput {
@@ -80,6 +85,11 @@ export interface RoutedArticleInput {
   sharedStableId: string;
   /** Cosine at routing time; null in broadcast mode (no embeddings). */
   routedSimilarity: number | null;
+  /** Shared-layer quality assessment; null when the shared row was never
+   *  scored (pre-quality-gate rows). Optional so callers predating the
+   *  columns still typecheck. */
+  qualityRigor?: number | null;
+  qualityEvidence?: number | null;
   collectedAt?: Date;
 }
 
@@ -121,6 +131,8 @@ const COLUMN_MIGRATIONS: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: 'refs_doi', ddl: 'ALTER TABLE article ADD COLUMN refs_doi TEXT' },
   { name: 'shared_stable_id', ddl: 'ALTER TABLE article ADD COLUMN shared_stable_id TEXT' },
   { name: 'routed_similarity', ddl: 'ALTER TABLE article ADD COLUMN routed_similarity REAL' },
+  { name: 'quality_rigor', ddl: 'ALTER TABLE article ADD COLUMN quality_rigor INTEGER' },
+  { name: 'quality_evidence', ddl: 'ALTER TABLE article ADD COLUMN quality_evidence INTEGER' },
 ];
 
 interface RawRow {
@@ -142,6 +154,8 @@ interface RawRow {
   refs_doi: string | null;
   shared_stable_id: string | null;
   routed_similarity: number | null;
+  quality_rigor: number | null;
+  quality_evidence: number | null;
 }
 
 function parseDate(s: string | null): Date | null {
@@ -265,8 +279,9 @@ export class ArticleStore {
     const stmt = this.db.prepare(
       `INSERT INTO article (url, url_hash, title, title_hash, source, field, snippet,
                             collected_at, collected_from,
-                            refs_arxiv, refs_doi, shared_stable_id, routed_similarity)
-       VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), 'shared-router', ?, ?, ?, ?)`,
+                            refs_arxiv, refs_doi, shared_stable_id, routed_similarity,
+                            quality_rigor, quality_evidence)
+       VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), 'shared-router', ?, ?, ?, ?, ?, ?)`,
     );
     const result = stmt.run(
       normalizedUrl,
@@ -281,6 +296,8 @@ export class ArticleStore {
       JSON.stringify(input.refsDoi),
       input.sharedStableId,
       input.routedSimilarity,
+      input.qualityRigor ?? null,
+      input.qualityEvidence ?? null,
     );
     return { result: 'inserted', id: Number(result.lastInsertRowid) };
   }
@@ -635,5 +652,7 @@ function toArticleRow(r: RawRow): ArticleRow {
     refsDoi: r.refs_doi ? JSON.parse(r.refs_doi) : null,
     sharedStableId: r.shared_stable_id ?? null,
     routedSimilarity: r.routed_similarity ?? null,
+    qualityRigor: r.quality_rigor ?? null,
+    qualityEvidence: r.quality_evidence ?? null,
   };
 }

@@ -51,13 +51,26 @@ Shared pipeline (once per article, not per user)
 
 Librarian (per enabled user in config/users.yaml)
   that user's pending articles
+    → load topic vocabulary once (registry.json, else a live scan)
     → router
-    → topic/source/entity/citation scouts   (explore THAT USER's vault)
-    → reviewer
+    → topic/source/entity/citation scouts   (explore THAT USER's vault,
+                                             topic-scout sees the vocabulary)
+    → reviewer                              (assigns against the vocabulary)
     → semantic article plans
-    → serial deterministic apply
+    → serial deterministic apply            (fuzzy-correct unknown slugs, gate
+                                             new topics, upsert entities)
     → wiki/sources, wiki/topics, wiki/entities backlinks
     → unresolved cites → External references + shared demand ledger
+
+Lint (per enabled user)
+  one scan of that user's vault
+    → regen registry (wiki/topics/_registry.md + registry.json)
+    → recount cited_by from inbound cites:
+    → re-rank topic member lists by importance
+    → regen index.md (navigation surface, not a catalog)
+    → export graph.json (nodes + edges for the visualization tool)
+    → report broken links / orphans / stubs / near-duplicate topics
+    → one commit
 
 Digest (per enabled user)
   that user's ArticleStore + vault context
@@ -72,6 +85,24 @@ Each user's vault is its own git repo at `~/chiya-data/users/<handle>/vault`
 with its pipeline DB inside it; the shared layer's cache + job log live at
 `~/chiya-data/shared/articles.db`. Tenants are registered in
 `pipelines/config/users.yaml` (managed via `npm run admin`).
+
+## Vault artifact contracts
+
+The vault's structure is deliberately legible to code, not just to humans. Four artifacts carry that contract; all four are **generated — never hand-edited, and never written by an LLM**.
+
+| Artifact | Written by | Read by | Contract |
+|---|---|---|---|
+| `wiki/topics/_registry.md` | lint `regen-registry` | humans, foreground agents | Rendered by `renderRegistryMarkdown`. Presentation only — not round-trippable, so nothing parses it back. |
+| `registry.json` (vault root) | lint `regen-registry` | librarian planner (`loadTopicRegistry`), future visualization tool | `{generatedAt, stats, clusters:[{name,topicCount}], topics:[{slug,title,oneLiner,clusters,memberCount,citedByTotal,updated}]}`. `parseRegistryJson` returns null on anything unexpected and the planner falls back to a live `scanTopicRegistry`, so a malformed or empty file degrades to a scan rather than blinding the agents. Keep this shape stable. |
+| `graph.json` (vault root) | lint `export-graph` | future visualization tool, any agent wanting topology | `{generatedAt, stats, nodes[], edges[]}`, one record per line (committed to a git repo — pretty-printing turns one added source into a thousand-line diff). Node id IS the wikilink target (`wiki/sources/<name>`); clusters have no page and use `cluster:<name>`. Edge types: `member`, `cites`, `related`, `mentions`, container → contained. Edges only between existing nodes — a dangling reference is a broken link for the report, not an edge to nowhere. |
+| `index.md` (vault root) | lint `regen-index` | humans, digest context | A navigation surface: clusters → their biggest topics, other page families, recent sources, stats. Explicitly **not** a catalog — the hand-maintained every-page index died at 21.8k sources. |
+
+Two structural rules the whole system depends on:
+
+- **Topics are a FLAT namespace** (`wiki/topics/<slug>.md`) with soft, overlapping `clusters:` frontmatter as the only grouping signal. Never a directory hierarchy, never a fixed tag taxonomy. Scanners ignore subdirectories under `wiki/topics/`; a page written into one is invisible to the registry, index, and graph.
+- **`_`-prefixed filenames are generated artifacts** and are skipped by every scan, so a scan never ingests its own output.
+
+The registry closes the loop that made 57% of sources `uncategorized`: lint enumerates the vocabulary → `registry.json` → the librarian injects a char-budgeted, cluster-grouped slug block into the topic-scout and reviewer prompts → the reviewer assigns against slugs that actually exist → apply's gate fuzzy-corrects the rest against fresh on-disk state. Registry = what the agents SEE; disk = what the gate BELIEVES. Don't collapse the two.
 
 ## Canonical live format decisions
 
@@ -102,6 +133,8 @@ The project currently relies on these safety patterns:
 - **Dry-run / plan-only librarian modes** for previewing changes.
 - **Doctor/status CLI commands** for operational inspection.
 - **Shared source fetch policy** for API source timeout/retry behavior.
+- **Content-compared vault writes in lint** — every lint write is diffed against current content first, so a run over an unchanged vault writes nothing and commits nothing. This is what makes a daily pass over 21.8k pages safe.
+- **Deterministic lint** — no LLM anywhere in that pipeline, and Phase A lint reports structural problems rather than acting on them. Merges/deletions arrive later as agent proposals for code to dispose of, not as agent-driven writes.
 
 If a change removes or bypasses any of these, call it out explicitly and justify it.
 
@@ -115,6 +148,9 @@ Future work should make these axes easier to extend without rewriting core workf
 - writer rules
 - workflow compositions
 - operational inspection commands
+- **lint passes** — a pass is a `Phase<LintCtx>` reading the single vault scan and writing through `planWrite`. Add one without touching the scan or the other passes; see `docs/developer-guide.md`.
+- **graph projections** — `src/shared/graph-export.ts` is a pure node/edge projector. New node or edge kinds go there, not into the lint phase.
+- **agent-facing vocabulary** — `vocabularyForPrompt` renders the registry into a char budget. Any new prompt that assigns against vault structure should take its vocabulary from there rather than re-scanning.
 
 Prefer small modules with explicit contracts over large all-purpose workflow files.
 
@@ -123,6 +159,7 @@ Prefer small modules with explicit contracts over large all-purpose workflow fil
 - `README.md` — top-level architecture and quick start.
 - `pipelines/README.md` — operational details, phase shape, env vars, systemd.
 - `docs/developer-guide.md` — extension surfaces and safety rules.
+- `<vault>/CLAUDE.md` — the vault constitution: page schema, frontmatter contracts, clusters, generated artifacts, multi-writer rules. Anything that writes pages must match it.
 - `docs/architecture-improvement-notes.md` — roadmap, open questions, historical decisions.
 - `CONTRIBUTING.md` — verification commands and contribution mechanics.
 

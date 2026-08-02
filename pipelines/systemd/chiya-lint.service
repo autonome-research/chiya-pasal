@@ -1,0 +1,27 @@
+[Unit]
+Description=Chiya lint — regenerate derived views, recount citations, report vault structure
+Documentation=https://github.com/Code4me2/chiya-library
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/chiya-library/pipelines
+# Rebuild the better-sqlite3 native binding against the running Node ABI.
+# The lint pipeline only uses SQLite for its job log, but that open happens
+# before any work, so a stale binding fails the run outright. Same guard as
+# chiya-librarian.service; ~1s when the binding is already current.
+ExecStartPre=%h/chiya-library/pipelines/scripts/rebuild-better-sqlite3.sh
+# Deterministic passes only — no inference endpoint is contacted, so this can
+# run regardless of whether the vllm tunnel is up.
+ExecStart=/usr/bin/env npx tsx src/lint.ts
+Environment=VAULT_DIR=%h/vault
+# Loads CHIYA_EMAIL_TO and any local overrides; leading `-` keeps the unit
+# valid on hosts that haven't set up the file yet.
+EnvironmentFile=-%h/chiya-library/pipelines/.env
+StandardOutput=journal
+StandardError=journal
+# A steady-state run reads ~100 MB across 24k pages and writes almost nothing
+# (every write is content-compared first). The FIRST run is the expensive one:
+# it stamps `cited_by` onto ~21.8k legacy source pages that never had the key.
+# 90 minutes is generous for that one-off and still bounds a runaway.
+TimeoutStartSec=5400

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import DatabaseCtor from 'better-sqlite3';
 import { ArticleStore } from '../src/shared/article-store.js';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
@@ -377,6 +378,20 @@ describe('ArticleStore routed rows (multi-tenant copy path)', () => {
     expect(row.routedSimilarity).toBeCloseTo(0.68, 6);
   });
 
+  it('upsertRouted persists quality scores', () => {
+    const r = store.upsertRouted({ ...routedInput, qualityRigor: 4, qualityEvidence: 3 });
+    const row = store.getById(r.id!)!;
+    expect(row.qualityRigor).toBe(4);
+    expect(row.qualityEvidence).toBe(3);
+  });
+
+  it('omitted quality scores read back as null (unscored, not zero)', () => {
+    const r = store.upsertRouted(routedInput);
+    const row = store.getById(r.id!)!;
+    expect(row.qualityRigor).toBeNull();
+    expect(row.qualityEvidence).toBeNull();
+  });
+
   it('upsertRouted dedups against an existing row by url', () => {
     store.upsertPending({ ...baseInput, url: routedInput.url, title: 'different title' });
     const r = store.upsertRouted(routedInput);
@@ -396,11 +411,13 @@ describe('ArticleStore routed rows (multi-tenant copy path)', () => {
     expect(row.refsDoi).toBeNull();
     expect(row.sharedStableId).toBeNull();
     expect(row.routedSimilarity).toBeNull();
+    expect(row.qualityRigor).toBeNull();
+    expect(row.qualityEvidence).toBeNull();
   });
 
   it('column migration is idempotent across store re-opens', () => {
     const dbPath = join(dir, 'test.db');
-    store.upsertRouted(routedInput);
+    store.upsertRouted({ ...routedInput, qualityRigor: 4, qualityEvidence: 3 });
     store.close();
     // Re-open twice; ALTER TABLE must not re-fire or clobber data.
     const second = new ArticleStore(dbPath);
@@ -409,5 +426,41 @@ describe('ArticleStore routed rows (multi-tenant copy path)', () => {
     const rows = store.listPending(10);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.sharedStableId).toBe('arxiv-2605-99999');
+    expect(rows[0]!.qualityRigor).toBe(4);
+    expect(rows[0]!.qualityEvidence).toBe(3);
+  });
+
+  it('a DB created before the quality columns existed opens and back-fills null', () => {
+    const dbPath = join(dir, 'legacy.db');
+    // Pre-migration schema: the original table shape, no additive columns.
+    const legacy = new DatabaseCtor(dbPath);
+    legacy.exec(`
+      CREATE TABLE article (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        url             TEXT,
+        url_hash        TEXT,
+        title           TEXT NOT NULL,
+        title_hash      TEXT NOT NULL,
+        source          TEXT,
+        field           TEXT,
+        snippet         TEXT,
+        collected_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        collected_from  TEXT NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'pending',
+        status_reason   TEXT,
+        processed_at    TEXT,
+        page_paths      TEXT NOT NULL DEFAULT '[]'
+      );
+      INSERT INTO article (url, url_hash, title, title_hash, collected_from)
+        VALUES ('https://example.com/legacy', 'abc', 'Legacy row', 'def', 'inbox');
+    `);
+    legacy.close();
+
+    const migrated = new ArticleStore(dbPath);
+    const rows = migrated.listPending(10);
+    migrated.close();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.qualityRigor).toBeNull();
+    expect(rows[0]!.qualityEvidence).toBeNull();
   });
 });

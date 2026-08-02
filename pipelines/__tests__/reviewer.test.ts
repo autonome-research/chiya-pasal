@@ -6,10 +6,12 @@ import type OpenAI from 'openai';
 
 import {
   applyReconcileAndGate,
+  buildReviewerSystemPrompt,
   isReviewerFailureReason,
   reviewerFailureAttempts,
   reviewerFailureReason,
   runReviewerWith,
+  REVIEWER_VOCABULARY_HEADING,
   type ReviewerAgentFn,
   type ReviewerClients,
   type ReviewerInput,
@@ -216,9 +218,7 @@ describe('reviewer failure deferral bookkeeping', () => {
 describe('applyReconcileAndGate', () => {
   const existingSlugs = new Set(['llm-evaluation', 'agent-benchmarks', 'transformers']);
   const sourceFiles = new Set(['arxiv-2403-12345', 'arxiv-2604-25099']);
-  const entityFiles = new Set(['anthropic']);
   const sourceExists = (f: string) => sourceFiles.has(f);
-  const entityExists = (s: string) => entityFiles.has(s);
 
   function reviewer(over: Partial<ReviewerOutput> = {}): ReviewerOutput {
     return {
@@ -243,11 +243,10 @@ describe('applyReconcileAndGate', () => {
       reviewer: r,
       existingTopicSlugs: existingSlugs,
       sourceExists,
-      entityExists,
     });
     expect(result.existingTopicSlugs).toEqual(['llm-evaluation', 'transformers']);
     expect(result.citeFilenames).toEqual(['arxiv-2403-12345']);
-    expect(result.entitySlugs).toEqual(['anthropic']);
+    expect(result.entities).toEqual([{ slug: 'anthropic', name: null, kind: null }]);
     expect(result.newTopicsToCreate).toEqual([]);
   });
 
@@ -266,7 +265,6 @@ describe('applyReconcileAndGate', () => {
       reviewer: r,
       existingTopicSlugs: existingSlugs,
       sourceExists,
-      entityExists,
     });
     expect(result.existingTopicSlugs).toEqual(['llm-evaluation']);
     expect(result.newTopicsToCreate).toEqual([]);
@@ -289,14 +287,13 @@ describe('applyReconcileAndGate', () => {
       reviewer: r,
       existingTopicSlugs: existingSlugs,
       sourceExists,
-      entityExists,
     });
     expect(result.newTopicsToCreate).toHaveLength(1);
     expect(result.newTopicsToCreate[0]!.slug).toBe('metric-losses');
     expect(result.existingTopicSlugs).toEqual(['metric-losses']);
   });
 
-  it('rejects a near-duplicate (one-char-off slug)', async () => {
+  it('snaps a near-duplicate new proposal onto the existing topic instead of dropping it', async () => {
     const r = reviewer({
       topics: [
         {
@@ -311,9 +308,32 @@ describe('applyReconcileAndGate', () => {
       reviewer: r,
       existingTopicSlugs: existingSlugs,
       sourceExists,
-      entityExists,
     });
     expect(result.newTopicsToCreate).toEqual([]);
+    expect(result.gateStats.fuzzyCorrected).toBe(1);
+    expect(result.existingTopicSlugs).toEqual(['transformers']);
+  });
+
+  it('still rejects a near-duplicate that the fuzzy matcher scores as unrelated', async () => {
+    // 'ml' vs 'mlops' is a prefix-rule duplicate for the gate but falls under
+    // nearestSlugs' similarity floor, so correction cannot reach it.
+    const r = reviewer({
+      topics: [
+        {
+          slug: 'mlops',
+          why: 'central',
+          isNew: true,
+          definition: 'Operational practices for deploying and monitoring machine-learning systems in production.',
+        },
+      ],
+    });
+    const result = await applyReconcileAndGate({
+      reviewer: r,
+      existingTopicSlugs: new Set(['ml']),
+      sourceExists,
+    });
+    expect(result.newTopicsToCreate).toEqual([]);
+    expect(result.gateStats.fuzzyCorrected).toBe(0);
     expect(result.gateStats.rejectedNearDuplicates).toBe(1);
     expect(result.existingTopicSlugs).toEqual(['uncategorized']);
   });
@@ -328,7 +348,6 @@ describe('applyReconcileAndGate', () => {
       reviewer: r,
       existingTopicSlugs: existingSlugs,
       sourceExists,
-      entityExists,
     });
     expect(result.newTopicsToCreate).toEqual([]);
     expect(result.gateStats.rejectedThinDefinition).toBe(1);
@@ -345,7 +364,6 @@ describe('applyReconcileAndGate', () => {
       reviewer: r,
       existingTopicSlugs: existingSlugs,
       sourceExists,
-      entityExists,
     });
     expect(result.existingTopicSlugs).toEqual(['uncategorized']);
     expect(result.gateStats.droppedHallucinations).toBe(1);
@@ -362,8 +380,202 @@ describe('applyReconcileAndGate', () => {
       reviewer: r,
       existingTopicSlugs: existingSlugs,
       sourceExists,
-      entityExists,
     });
     expect(result.citeFilenames).toEqual(['arxiv-2403-12345']);
+  });
+});
+
+describe('reviewer topic vocabulary injection', () => {
+  const VOCAB = 'ai-ml (3): llm-evaluation, transformers (+1 more)\nphysics (1): quantum-sensing';
+
+  it('injects the run vocabulary into the system prompt under the assign-to-these heading', async () => {
+    const { vault, cleanup } = makeVault();
+    try {
+      let seenSystem = '';
+      const fakeAgent: ReviewerAgentFn = async (system) => {
+        seenSystem = system;
+        return { text: '{"topics":[],"cites":[],"related":[],"entities":[]}', finishReason: 'stop', toolRounds: 0 };
+      };
+      await runReviewerWith(makeInput({ vocabulary: VOCAB }), clients, vault, undefined, fakeAgent);
+
+      expect(seenSystem).toContain(REVIEWER_VOCABULARY_HEADING);
+      expect(seenSystem).toContain('assign to these when applicable');
+      expect(seenSystem).toContain('ai-ml (3): llm-evaluation, transformers');
+      expect(seenSystem).toContain('quantum-sensing');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('omits the vocabulary block entirely when no registry is available', () => {
+    const bare = buildReviewerSystemPrompt(undefined);
+    expect(bare).not.toContain(REVIEWER_VOCABULARY_HEADING);
+    expect(buildReviewerSystemPrompt('   ')).toBe(bare);
+    // The static policy prefix is byte-identical with and without vocabulary
+    // (prompt-cache prefix).
+    expect(buildReviewerSystemPrompt(VOCAB).startsWith(bare)).toBe(true);
+  });
+
+  it('parses clusters and entity kind/name from the new-topic contract', async () => {
+    const { vault, cleanup } = makeVault();
+    try {
+      const fakeAgent: ReviewerAgentFn = async () => ({
+        text: JSON.stringify({
+          topics: [
+            {
+              slug: 'Metric Losses',
+              why: 'central',
+              isNew: true,
+              definition: 'Loss functions defined over arbitrary metric spaces.',
+              clusters: ['AI/ML', 'statistics', 'third-one-dropped'],
+            },
+          ],
+          cites: [],
+          related: [],
+          entities: [{ slug: 'Anthropic', name: 'Anthropic', kind: 'company', why: 'author' }],
+        }),
+        finishReason: 'stop',
+        toolRounds: 0,
+      });
+      const out = await runReviewerWith(makeInput(), clients, vault, undefined, fakeAgent);
+      // Slugs are sanitized at the LLM boundary — they become file paths.
+      expect(out.topics[0]!.slug).toBe('metric-losses');
+      expect(out.topics[0]!.clusters).toEqual(['ai-ml', 'statistics']);
+      expect(out.entities[0]).toEqual({
+        slug: 'anthropic',
+        why: 'author',
+        name: 'Anthropic',
+        kind: 'organization',
+      });
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('drops slugs that sanitize to nothing and unknown entity kinds', async () => {
+    const { vault, cleanup } = makeVault();
+    try {
+      const fakeAgent: ReviewerAgentFn = async () => ({
+        text: JSON.stringify({
+          topics: [{ slug: '///', why: 'garbage' }, { slug: 'ok-topic', why: 'fine' }],
+          cites: [],
+          related: [],
+          entities: [{ slug: 'openai', why: 'central', kind: 'spaceship' }],
+        }),
+        finishReason: 'stop',
+        toolRounds: 0,
+      });
+      const out = await runReviewerWith(makeInput(), clients, vault, undefined, fakeAgent);
+      expect(out.topics.map((t) => t.slug)).toEqual(['ok-topic']);
+      expect(out.entities[0]!.kind).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe('applyReconcileAndGate — fuzzy correction and clusters', () => {
+  const existingSlugs = new Set(['agent-memory', 'llm-evaluation', 'quantum-sensing']);
+  const sourceExists = (): boolean => false;
+
+  function gate(topics: ReviewerOutput['topics'], slugs = existingSlugs) {
+    return applyReconcileAndGate({
+      reviewer: { topics, cites: [], related: [], entities: [] },
+      existingTopicSlugs: slugs,
+      sourceExists,
+    });
+  }
+
+  it('corrects a near-miss slug onto the known one instead of dropping it', async () => {
+    const result = await gate([{ slug: 'quantum-sesning', why: 'typo' }]);
+    expect(result.existingTopicSlugs).toEqual(['quantum-sensing']);
+    expect(result.gateStats.fuzzyCorrected).toBe(1);
+    expect(result.gateStats.droppedHallucinations).toBe(0);
+  });
+
+  it('corrects plural drift', async () => {
+    const result = await gate([{ slug: 'agent-memories', why: 'plural drift' }]);
+    expect(result.existingTopicSlugs).toEqual(['agent-memory']);
+    expect(result.gateStats.fuzzyCorrected).toBe(1);
+  });
+
+  it('leaves a distant slug alone: a new proposal still creates a new topic', async () => {
+    const result = await gate([
+      {
+        slug: 'photonic-interconnects',
+        why: 'genuinely new',
+        isNew: true,
+        definition: 'Optical links used to move data between chips and racks at low energy per bit.',
+        clusters: ['hardware'],
+      },
+    ]);
+    expect(result.gateStats.fuzzyCorrected).toBe(0);
+    expect(result.newTopicsToCreate).toEqual([
+      {
+        slug: 'photonic-interconnects',
+        definition: 'Optical links used to move data between chips and racks at low energy per bit.',
+        clusters: ['hardware'],
+      },
+    ]);
+  });
+
+  it('never fuzzy-corrects short slugs: gpt-4 is not gpt-4o', async () => {
+    // isNearDuplicate's prefix rule has no length floor of its own, so the
+    // MIN_FUZZY_SLUG_LEN floor must guard both acceptance branches.
+    const result = await gate([{ slug: 'gpt-4', why: 'model page' }], new Set(['gpt-4o']));
+    expect(result.gateStats.fuzzyCorrected).toBe(0);
+    expect(result.existingTopicSlugs).not.toContain('gpt-4o');
+  });
+
+  it('leaves a distant non-new slug as a dropped hallucination', async () => {
+    const result = await gate([{ slug: 'photonic-interconnects', why: 'invented' }]);
+    expect(result.gateStats.fuzzyCorrected).toBe(0);
+    expect(result.gateStats.droppedHallucinations).toBe(1);
+    expect(result.existingTopicSlugs).toEqual(['uncategorized']);
+  });
+
+  it('a corrected slug loses its new-topic proposal (the existing page owns its definition)', async () => {
+    const result = await gate([
+      {
+        slug: 'quantum-sesning',
+        why: 'typo, proposed as new',
+        isNew: true,
+        definition: 'Measurement techniques exploiting quantum coherence for sensitivity beyond classical limits.',
+      },
+    ]);
+    expect(result.newTopicsToCreate).toEqual([]);
+    expect(result.existingTopicSlugs).toEqual(['quantum-sensing']);
+    expect(result.gateStats.fuzzyCorrected).toBe(1);
+  });
+
+  it('defaults clusters to [] when the reviewer omits them', async () => {
+    const result = await gate([
+      {
+        slug: 'photonic-interconnects',
+        why: 'new',
+        isNew: true,
+        definition: 'Optical links used to move data between chips and racks at low energy per bit.',
+      },
+    ]);
+    expect(result.newTopicsToCreate[0]!.clusters).toEqual([]);
+  });
+
+  it('passes entities through unfiltered and de-duplicated (apply creates missing pages)', async () => {
+    const result = await applyReconcileAndGate({
+      reviewer: {
+        topics: [],
+        cites: [],
+        related: [],
+        entities: [
+          { slug: 'never-seen-lab', why: 'central', kind: 'organization' },
+          { slug: 'never-seen-lab', why: 'dup' },
+        ],
+      },
+      existingTopicSlugs: existingSlugs,
+      sourceExists,
+    });
+    expect(result.entities).toEqual([
+      { slug: 'never-seen-lab', name: null, kind: 'organization' },
+    ]);
   });
 });

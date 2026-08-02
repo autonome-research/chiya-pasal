@@ -43,7 +43,9 @@ const EMBED_BATCH = 64;
 const ROUTE_BATCH = 200;
 
 /** Copy one shared-cache article into one user's store. Shared by both
- *  routing modes so provenance fields stay consistent. */
+ *  routing modes so provenance fields stay consistent. The quality
+ *  assessment rides along: it is the only place the per-user layer can
+ *  learn it, and the wiki's importance signals are projected from it. */
 function copyToUser(
   userStore: ArticleStore,
   article: SharedArticleRow,
@@ -59,6 +61,8 @@ function copyToUser(
     refsDoi: article.refsDoi,
     sharedStableId: article.stableId,
     routedSimilarity: similarity,
+    qualityRigor: article.quality?.rigor ?? null,
+    qualityEvidence: article.quality?.evidence ?? null,
     collectedAt: article.collectedAt,
   });
   return r.result === 'inserted' ? 'inserted' : 'duplicate';

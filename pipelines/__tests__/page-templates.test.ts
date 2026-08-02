@@ -242,6 +242,45 @@ describe('formatSourcePage', () => {
     expect(fm.field).toBe('unknown');
   });
 
+  it('rigor / evidence render when scored', () => {
+    const fm = parseFrontmatter(formatSourcePage(baseSourceInput({ rigor: 4, evidence: 3 })));
+    expect(fm.rigor).toBe('4');
+    expect(fm.evidence).toBe('3');
+  });
+
+  it('rigor / evidence omitted entirely when unknown (legacy rows)', () => {
+    const undef = formatSourcePage(baseSourceInput());
+    expect(parseFrontmatter(undef).rigor).toBeUndefined();
+    expect(parseFrontmatter(undef).evidence).toBeUndefined();
+    expect(undef).not.toContain('rigor:');
+    expect(undef).not.toContain('evidence:');
+
+    const nulled = formatSourcePage(baseSourceInput({ rigor: null, evidence: null }));
+    expect(nulled).not.toContain('rigor:');
+    expect(nulled).not.toContain('evidence:');
+  });
+
+  it('one score known, the other unknown → only the known line', () => {
+    const fm = parseFrontmatter(formatSourcePage(baseSourceInput({ rigor: 2 })));
+    expect(fm.rigor).toBe('2');
+    expect(fm.evidence).toBeUndefined();
+  });
+
+  it('cited_by: 0 present on every new source page', () => {
+    expect(parseFrontmatter(formatSourcePage(baseSourceInput())).cited_by).toBe('0');
+    expect(
+      parseFrontmatter(formatSourcePage(baseSourceInput({ rigor: 5, evidence: 5 }))).cited_by,
+    ).toBe('0');
+  });
+
+  it('cited_by is bumpable in place by the lint pass', () => {
+    const page = formatSourcePage(baseSourceInput());
+    const bumped = bumpFrontmatterField(page, 'cited_by', 7);
+    expect(parseFrontmatter(bumped).cited_by).toBe('7');
+    // In place — not appended as a second key.
+    expect(bumped.split('cited_by:')).toHaveLength(2);
+  });
+
   it('Cited by section starts empty', () => {
     const out = formatSourcePage(baseSourceInput());
     const idx = out.indexOf('## Cited by');

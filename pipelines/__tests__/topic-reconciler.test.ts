@@ -146,3 +146,28 @@ describe('isSubstantiveDefinition', () => {
     )).toBe(true);
   });
 });
+
+describe('reconcileTopicOutput — cluster metadata', () => {
+  it('carries a surviving proposal\'s clusters through untouched', () => {
+    const out: TopicOutput = {
+      decisions: [{ i: 0, topics: ['photonic-interconnects'] }],
+      newTopics: [
+        { slug: 'photonic-interconnects', definition: 'new topic', members: [0], clusters: ['hardware'] },
+      ],
+    };
+    const r = reconcileTopicOutput(out, new Set(['unrelated-slug']));
+    expect(r.reconciled.newTopics[0]!.clusters).toEqual(['hardware']);
+  });
+
+  it('drops clusters with the proposal when it folds into an existing slug', () => {
+    const out: TopicOutput = {
+      decisions: [{ i: 0, topics: ['hardware-accelerators'] }],
+      newTopics: [
+        { slug: 'hardware-accelerators', definition: 'false new', members: [0], clusters: ['hardware'] },
+      ],
+    };
+    const r = reconcileTopicOutput(out, new Set(['hardware-accelerators']));
+    expect(r.reconciled.newTopics).toEqual([]);
+    expect(r.foldedSlugs).toEqual(['hardware-accelerators']);
+  });
+});
