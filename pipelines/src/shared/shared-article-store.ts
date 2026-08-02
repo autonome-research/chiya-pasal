@@ -110,6 +110,35 @@ export interface CitationDemandSummary {
   citers: string[];
 }
 
+/** Demand for one missing paper aggregated across ALL users, counted by
+ *  distinct citing article. The unit tier-3 ingestion decides on. */
+export interface DemandTotal {
+  refKind: 'arxiv' | 'doi';
+  refId: string;
+  /** Number of DISTINCT citing articles (not ledger rows). */
+  demandCount: number;
+  citers: string[];
+  /** Users whose vaults want this paper. */
+  userHandles: string[];
+}
+
+/** A demand total that survived the satisfaction check, carrying the stable
+ *  id the paper will occupy once ingested. */
+export interface UnsatisfiedDemand extends DemandTotal {
+  stableId: string;
+}
+
+export interface UnsatisfiedDemandReport {
+  /** Capped by `limit`, ordered by demandCount desc. */
+  rows: UnsatisfiedDemand[];
+  /** Distinct papers meeting the citer threshold, before satisfaction filtering. */
+  eligible: number;
+  /** Eligible papers already in the library (stable id exists). */
+  satisfied: number;
+  /** Above-threshold refs whose id could not be mapped to a stable id. */
+  unmapped: number;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS shared_article (
   stable_id          TEXT PRIMARY KEY,
@@ -658,6 +687,146 @@ export class SharedArticleStore {
       demandCount: r.demand_count,
       citers: r.citers.split(','),
     }));
+  }
+
+  /**
+   * Cross-user demand totals: one row per missing paper, counted by DISTINCT
+   * citing article rather than by ledger row.
+   *
+   * `citationDemandSummary` deliberately groups per user (it answers "what
+   * does alice's vault want?"). Tier-3 ingestion is a shared-layer decision —
+   * one fetch serves everyone — so it needs the union: a paper cited by two
+   * of alice's articles and one of bob's has three distinct citers, and
+   * counting ledger rows would double-count the same source page copied into
+   * two vaults.
+   */
+  citationDemandTotals(opts: { userHandle?: string; minCiters?: number } = {}): DemandTotal[] {
+    const params: (string | number)[] = [];
+    let where = '';
+    if (opts.userHandle) {
+      where = 'WHERE user_handle = ?';
+      params.push(opts.userHandle);
+    }
+    const minCiters = opts.minCiters ?? 1;
+    const rows = this.db
+      .prepare(
+        `SELECT ref_kind, ref_id,
+                COUNT(DISTINCT citing_stable_id) AS demand_count,
+                GROUP_CONCAT(DISTINCT citing_stable_id) AS citers,
+                GROUP_CONCAT(DISTINCT user_handle) AS handles
+           FROM citation_demand ${where}
+          GROUP BY ref_kind, ref_id
+         HAVING COUNT(DISTINCT citing_stable_id) >= ?
+          ORDER BY demand_count DESC, ref_id ASC`,
+      )
+      .all(...params, minCiters) as Array<{
+        ref_kind: 'arxiv' | 'doi';
+        ref_id: string;
+        demand_count: number;
+        citers: string;
+        handles: string;
+      }>;
+    return rows.map((r) => ({
+      refKind: r.ref_kind,
+      refId: r.ref_id,
+      demandCount: r.demand_count,
+      citers: r.citers.split(','),
+      userHandles: r.handles.split(','),
+    }));
+  }
+
+  /** Which of these stable ids already have a shared_article row. Chunked so
+   *  a large candidate list can't blow SQLite's variable limit. */
+  existingStableIds(ids: readonly string[]): Set<string> {
+    const found = new Set<string>();
+    const unique = [...new Set(ids)].filter((id) => id.length > 0);
+    const CHUNK = 400;
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const chunk = unique.slice(i, i + CHUNK);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(`SELECT stable_id FROM shared_article WHERE stable_id IN (${placeholders})`)
+        .all(...chunk) as Array<{ stable_id: string }>;
+      for (const r of rows) found.add(r.stable_id);
+    }
+    return found;
+  }
+
+  /**
+   * The tier-3 trigger query: highly-demanded papers the library does NOT
+   * already have.
+   *
+   * Satisfaction is COMPUTED, never stored — a ref is satisfied when the
+   * stable id it would occupy already exists in shared_article. That mapping
+   * (arXiv id / DOI → stable id) lives with the demand feature, so it is
+   * injected as `stableIdFor` rather than imported here: this module stays
+   * below the page-template layer it would otherwise depend on.
+   *
+   * Order of operations matters:
+   *
+   *   1. aggregate the whole ledger (no threshold yet);
+   *   2. map each ref to its stable id, MERGING refs that name the same paper
+   *      ('2301.03728' and '2301.03728v2') so their demand adds up instead of
+   *      splitting below the bar;
+   *   3. apply the citer threshold to merged demand;
+   *   4. drop already-satisfied papers;
+   *   5. only then apply the limit — so a run is never starved by a prefix of
+   *      papers it already has.
+   *
+   * A ref whose id doesn't map (malformed ledger entry) is counted as
+   * `unmapped` and dropped: we can neither decide satisfaction nor build a
+   * fetchable URL for it.
+   */
+  unsatisfiedCitationDemand(opts: {
+    stableIdFor: (refKind: 'arxiv' | 'doi', refId: string) => string | null;
+    userHandle?: string;
+    minCiters?: number;
+    limit?: number;
+  }): UnsatisfiedDemandReport {
+    const minCiters = opts.minCiters ?? 1;
+    const totals = this.citationDemandTotals({ userHandle: opts.userHandle, minCiters: 1 });
+
+    const byStableId = new Map<string, UnsatisfiedDemand & { citerSet: Set<string> }>();
+    let unmapped = 0;
+    for (const t of totals) {
+      const stableId = opts.stableIdFor(t.refKind, t.refId);
+      if (!stableId) {
+        if (t.demandCount >= minCiters) unmapped++;
+        continue;
+      }
+      const prev = byStableId.get(stableId);
+      if (!prev) {
+        byStableId.set(stableId, {
+          ...t,
+          stableId,
+          citerSet: new Set(t.citers),
+          userHandles: [...t.userHandles],
+        });
+        continue;
+      }
+      for (const c of t.citers) prev.citerSet.add(c);
+      for (const h of t.userHandles) if (!prev.userHandles.includes(h)) prev.userHandles.push(h);
+    }
+
+    const eligible: UnsatisfiedDemand[] = [...byStableId.values()]
+      .map(({ citerSet, ...row }) => ({
+        ...row,
+        citers: [...citerSet].sort(),
+        demandCount: citerSet.size,
+      }))
+      .filter((row) => row.demandCount >= minCiters)
+      .sort((a, b) => b.demandCount - a.demandCount || a.refId.localeCompare(b.refId));
+
+    const existing = this.existingStableIds(eligible.map((m) => m.stableId));
+    const unsatisfied = eligible.filter((m) => !existing.has(m.stableId));
+
+    const limit = opts.limit ?? 25;
+    return {
+      rows: limit >= 0 ? unsatisfied.slice(0, limit) : unsatisfied,
+      eligible: eligible.length,
+      satisfied: eligible.length - unsatisfied.length,
+      unmapped,
+    };
   }
 
   countByStatus(): Record<SharedStatus, number> {

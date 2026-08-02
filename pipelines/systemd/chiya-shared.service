@@ -2,6 +2,8 @@
 Description=Chiya shared pipeline — absorb, enrich, summarize, embed, route
 Documentation=https://github.com/autonome-research/chiya-pasal
 After=network-online.target
+# A failed run emails the operator; without this a broken pipeline is silent.
+OnFailure=chiya-alert@%n.service
 
 [Service]
 Type=oneshot

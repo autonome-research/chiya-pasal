@@ -2,6 +2,8 @@
 Description=Chiya lint — regenerate derived views, recount citations, report vault structure
 Documentation=https://github.com/Code4me2/chiya-library
 After=network-online.target
+# A failed run emails the operator; without this a broken pipeline is silent.
+OnFailure=chiya-alert@%n.service
 
 [Service]
 Type=oneshot

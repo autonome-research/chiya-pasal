@@ -1,0 +1,34 @@
+[Unit]
+Description=Chiya demand ingestion — fetch the most-cited papers the library is missing
+Documentation=https://github.com/Code4me2/chiya-library
+After=network-online.target
+Wants=network-online.target
+# A failed run emails the operator; without this a broken pipeline is silent.
+# (Both implementers asked for this at integration time: the unit shipped with
+# no handler because the fleet alerting landed in the same phase.)
+OnFailure=chiya-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/chiya-library/pipelines
+# Rebuild the better-sqlite3 native binding against the running Node ABI.
+# This job opens the shared DB before it does anything else, so a stale
+# binding fails the run outright. Same guard as chiya-lint.service; ~1s when
+# the binding is already current.
+ExecStartPre=%h/chiya-library/pipelines/scripts/rebuild-better-sqlite3.sh
+# Reads the citation demand ledger, resolves metadata from arXiv/Crossref,
+# and writes ONE <date>-demand-articles.md into the shared inbox. No vault
+# access, no git, no LLM — so this runs regardless of the vllm tunnel state.
+ExecStart=/usr/bin/env npx tsx src/demand-ingest.ts
+# Loads CHIYA_DATA_ROOT / CHIYA_SHARED_INBOX / CHIYA_UNPAYWALL_EMAIL and any
+# local overrides; leading `-` keeps the unit valid before the file exists.
+EnvironmentFile=-%h/chiya-library/pipelines/.env
+StandardOutput=journal
+StandardError=journal
+# Worst case is ~25 refs at ~1 req/s plus retries. Ten minutes bounds a
+# runaway without truncating a slow arXiv/Crossref day.
+TimeoutStartSec=600
+# A failed run is self-healing: nothing is recorded, so the next tick
+# re-evaluates exactly the same demand. The OnFailure= above exists so the
+# operator hears about a run that has been failing for a week, not because a
+# single failure needs intervention.

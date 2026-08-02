@@ -1,6 +1,8 @@
 [Unit]
 Description=Chiya digest pipeline (%i)
 Documentation=https://github.com/Code4me2/chiya-library
+# A failed run emails the operator; without this a broken digest is silent.
+OnFailure=chiya-alert@%n.service
 
 [Service]
 Type=oneshot

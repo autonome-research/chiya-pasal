@@ -44,6 +44,11 @@ export interface ArticleRow {
    *  rows and on anything that never passed through the shared pipeline. */
   qualityRigor: number | null;
   qualityEvidence: number | null;
+  /** When a digest consumed this row (classified it into a bucket, skip
+   *  included) AND the digest email actually went out. Null = still eligible
+   *  for the next digest. Independent of the librarian's `status` FSM: the
+   *  two pipelines consume the same rows for different purposes. */
+  digestedAt: Date | null;
 }
 
 export interface ArticleInput {
@@ -133,6 +138,7 @@ const COLUMN_MIGRATIONS: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: 'routed_similarity', ddl: 'ALTER TABLE article ADD COLUMN routed_similarity REAL' },
   { name: 'quality_rigor', ddl: 'ALTER TABLE article ADD COLUMN quality_rigor INTEGER' },
   { name: 'quality_evidence', ddl: 'ALTER TABLE article ADD COLUMN quality_evidence INTEGER' },
+  { name: 'digested_at', ddl: 'ALTER TABLE article ADD COLUMN digested_at TEXT' },
 ];
 
 interface RawRow {
@@ -156,10 +162,27 @@ interface RawRow {
   routed_similarity: number | null;
   quality_rigor: number | null;
   quality_evidence: number | null;
+  digested_at: string | null;
 }
 
 function parseDate(s: string | null): Date | null {
   return s ? new Date(s + 'Z') : null;
+}
+
+/**
+ * Half-open UTC range covering a LOCAL calendar day, in the
+ * 'YYYY-MM-DD HH:MM:SS' text form collected_at is stored in (lexicographically
+ * comparable). `new Date(y, m-1, d)` is local midnight; toISOString converts
+ * it to the corresponding UTC instant. Null on a malformed date string.
+ */
+function localDayRangeUtc(localYmd: string): { start: string; end: string } | null {
+  const [y, m, d] = localYmd.split('-').map(Number);
+  if (!y || !m || !d) return null;
+  const fmt = (dt: Date): string => dt.toISOString().slice(0, 19).replace('T', ' ');
+  return {
+    start: fmt(new Date(y, m - 1, d, 0, 0, 0, 0)),
+    end: fmt(new Date(y, m - 1, d + 1, 0, 0, 0, 0)),
+  };
 }
 
 function sha256(s: string): string {
@@ -457,21 +480,70 @@ export class ArticleStore {
    * or 08:00 through 08:00 (PST).
    */
   listByLocalDate(localYmd: string): ArticleRow[] {
-    const [y, m, d] = localYmd.split('-').map(Number);
-    if (!y || !m || !d) return [];
-    // `new Date(y, m-1, d)` constructs a local-midnight Date; toISOString
-    // converts to the corresponding UTC instant. SQLite stores collected_at
-    // as 'YYYY-MM-DD HH:MM:SS' UTC text, comparable lexicographically.
-    const startUtc = new Date(y, m - 1, d, 0, 0, 0, 0);
-    const endUtc = new Date(y, m - 1, d + 1, 0, 0, 0, 0);
-    const fmt = (dt: Date): string => dt.toISOString().slice(0, 19).replace('T', ' ');
+    const range = localDayRangeUtc(localYmd);
+    if (!range) return [];
     const rows = this.db
       .prepare(
         `SELECT * FROM article WHERE collected_at >= ? AND collected_at < ?
          ORDER BY id ASC`,
       )
-      .all(fmt(startUtc), fmt(endUtc)) as RawRow[];
+      .all(range.start, range.end) as RawRow[];
     return rows.map(toArticleRow);
+  }
+
+  /**
+   * Same window as listByLocalDate, minus everything a previous digest
+   * already consumed (`digested_at IS NULL`).
+   *
+   * This is what makes AM and PM different runs rather than the same run
+   * twice: before `digested_at` existed both digests loaded the whole local
+   * day and emailed the identical set of articles, so the PM mail was a
+   * verbatim repeat of the AM mail plus whatever arrived in between.
+   */
+  listUndigestedByLocalDate(localYmd: string): ArticleRow[] {
+    const range = localDayRangeUtc(localYmd);
+    if (!range) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM article
+         WHERE collected_at >= ? AND collected_at < ? AND digested_at IS NULL
+         ORDER BY id ASC`,
+      )
+      .all(range.start, range.end) as RawRow[];
+    return rows.map(toArticleRow);
+  }
+
+  /**
+   * Stamp `digested_at` on the rows a digest consumed. Called by the digest's
+   * email phase AFTER a successful send — a failed send must leave the rows
+   * eligible for the next run, so this is deliberately not part of loading.
+   *
+   * Already-stamped rows are left alone (`digested_at IS NULL` guard) so a
+   * re-run can't rewrite the timestamp of an older digest's articles. Runs in
+   * one transaction, chunked under SQLite's bound-parameter limit.
+   * Returns the number of rows newly stamped.
+   */
+  markDigested(ids: number[], at: Date = new Date()): number {
+    const unique = [...new Set(ids.filter((id) => Number.isInteger(id)))];
+    if (unique.length === 0) return 0;
+    const stamp = at.toISOString().slice(0, 19).replace('T', ' ');
+    const CHUNK = 400;
+    const tx = this.db.transaction((all: number[]) => {
+      let changed = 0;
+      for (let i = 0; i < all.length; i += CHUNK) {
+        const chunk = all.slice(i, i + CHUNK);
+        const placeholders = chunk.map(() => '?').join(',');
+        const result = this.db
+          .prepare(
+            `UPDATE article SET digested_at = ?
+             WHERE id IN (${placeholders}) AND digested_at IS NULL`,
+          )
+          .run(stamp, ...chunk);
+        changed += result.changes;
+      }
+      return changed;
+    });
+    return tx(unique) as number;
   }
 
   getById(id: number): ArticleRow | null {
@@ -654,5 +726,6 @@ function toArticleRow(r: RawRow): ArticleRow {
     routedSimilarity: r.routed_similarity ?? null,
     qualityRigor: r.quality_rigor ?? null,
     qualityEvidence: r.quality_evidence ?? null,
+    digestedAt: parseDate(r.digested_at ?? null),
   };
 }

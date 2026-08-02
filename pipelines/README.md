@@ -13,9 +13,16 @@ tenants from `config/users.yaml`.
 |---|---|---|
 | `shared` | live (routing mode: broadcast until the embedding service returns) | every 30 min |
 | `librarian` | live, multi-tenant (router → scouts → reviewer → serial apply per user) | every 10 min |
-| `lint` | multi-tenant, deterministic (regenerate derived views, recount citations, report structure). Units written, **not yet enabled** | daily 00:15 local |
+| `lint` | multi-tenant, deterministic (resolve external refs, regenerate derived views, recount citations, report structure). Units written, **not yet enabled** | daily 00:15 local |
 | `digest` | live, multi-tenant | 06:30 / 18:30 local |
+| `demand-ingest` | standalone daily job (citation demand ledger → shared inbox). Units written, **not yet enabled** | daily 05:10 local |
 | `intake` | retired — absorbed into the shared pipeline | — |
+
+Failure alerting: `chiya-shared`, `chiya-librarian`, `chiya-lint`, `chiya-digest@` and
+`chiya-demand` all carry `OnFailure=chiya-alert@%n.service`, which emails the operator
+the failed unit's last 30 journal lines. `chiya-alert@` deliberately has no `OnFailure=`
+of its own and `scripts/alert-failure.sh` exits 0 on every path — an alerter that can
+fail is an alerter that needs an alerter.
 
 `npm test`, `npm run build`. The full suite is the merge gate.
 
@@ -49,6 +56,8 @@ In multi-tenant mode (a `config/users.yaml` exists) per-user email, vault, and i
 | `CHIYA_USERS_FILE` | `config/users.yaml` | Tenant registry (managed via `npm run admin`) |
 | `CHIYA_SHARED_INBOX` | `<dataRoot>/shared/inbox` | Where matcha's `*-articles.md` land (live deploy uses `<dataRoot>/shared/raw/inbox` — matcha's collect.sh writes `$VAULT_DIR/raw/inbox`) |
 | `CHIYA_UNPAYWALL_EMAIL` | unset | Contact email for Unpaywall OA lookups; the OA enrichment rung is skipped without it |
+| `CHIYA_CONTACT_EMAIL` | falls back to `CHIYA_UNPAYWALL_EMAIL` | Contact address for the arXiv/Crossref polite pools used by `demand-ingest`. Unset = anonymous pools + a WARN line |
+| `CHIYA_ALERT_EMAIL` | falls back to `CHIYA_EMAIL_TO` | Where `chiya-alert@` mails unit failures. With neither set the alerter logs to the journal and exits 0 |
 | `CHIYA_ROUTING_MODE` | `embedding` | `broadcast` = every quality-passing article to every user, no embeddings (current live mode) |
 | `EMBED_INFERENCE_BASE_URL` | `http://localhost:11437/v1` | Embeddings endpoint (unused in broadcast mode) |
 
@@ -71,7 +80,17 @@ npm run digest:am                 # tsx src/digest.ts AM
 npm run digest:pm                 # tsx src/digest.ts PM
 npm run backfill-archive-articles -- --status=done     # recover dedup memory after DB loss
 npm run backfill-archive-articles -- --status=pending  # re-queue archived resources for graph curation
+
+npm run demand-ingest -- --dry-run          # what the ledger wants; no network, no writes
+npm run demand-ingest -- --limit=5          # resolve + emit one inbox file (capped first run)
+npm run backfill-clusters-llm -- --user velvet --limit 60   # LLM cluster proposals, dry run
+npm run backfill-clusters-llm -- --user velvet --execute    # write clusters: frontmatter
+npm run fix-extensionless-pages -- --user velvet            # extensionless page audit, dry run
+npm run fix-extensionless-pages -- --user velvet --execute  # rename/dedupe them
 ```
+
+The last three are operator one-shots, not scheduled jobs: each defaults to a dry run,
+prints a one-line JSON summary, and never touches git.
 
 Each pipeline run logs every event to stdout. Persisted job + event log lives in `$THREAD_PHASE_DB`. Inspect with sqlite directly or via thread-phase's `JobStore.getJob` / `getEvents`. `npm run doctor` exits nonzero only for failed checks; warnings cover optional/non-blocking issues such as skipped network checks or a dirty vault worktree.
 
@@ -89,6 +108,9 @@ ln -sf ~/chiya-library/pipelines/systemd/chiya-lint.timer          ~/.config/sys
 ln -sf ~/chiya-library/pipelines/systemd/chiya-digest@.service     ~/.config/systemd/user/
 ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-am.timer     ~/.config/systemd/user/
 ln -sf ~/chiya-library/pipelines/systemd/chiya-digest-pm.timer     ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-alert@.service      ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-demand.service      ~/.config/systemd/user/
+ln -sf ~/chiya-library/pipelines/systemd/chiya-demand.timer        ~/.config/systemd/user/
 
 systemctl --user daemon-reload
 systemctl --user enable --now \
@@ -107,6 +129,13 @@ should be run by hand (after `--dry-run`) before the timer takes over. Enable it
 `systemctl --user enable --now chiya-lint.timer` once that has happened. Its
 `TimeoutStartSec=5400` is sized for that one-off; steady-state runs are ~12s and write
 nothing.
+
+`chiya-demand.timer` is likewise left out: run `npm run demand-ingest -- --dry-run` and
+then a capped `-- --limit=5` by hand before enabling it, since the first unthrottled run
+emits ~25 papers into the shared inbox at once. `chiya-alert@.service` is a template —
+never enabled, only started by the other units' `OnFailure=`. Verify the wiring with
+`systemctl --user show chiya-lint.service -p OnFailure` and smoke-test it with
+`systemctl --user start chiya-alert@chiya-lint.service`.
 
 Every pipeline service has `ExecStartPre=npm rebuild better-sqlite3` so a silent Node ABI bump can't break the DB binding. Roughly 1s when already-current, ~30s when actually rebuilding.
 
@@ -160,6 +189,43 @@ route               (mode)   CHIYA_ROUTING_MODE:
 
 Shared-cache article FSM: `pending → enriched | enrich-failed → summarized → (embedded →) routed | rejected-quality | failed`. Status transitions happen only after the work they record is durably complete, so a crash mid-tick resumes cleanly at the next one. Unresolved external references reported by per-user librarians accumulate in the shared `citation_demand` ledger (the trigger data for future demand-driven ingestion).
 
+### demand-ingest.ts
+
+Tier-3 citation ingestion: the one place the *vault* gets to ask for an article instead
+of the collector. Deliberately **not** a thread-phase pipeline — no vault, no git, no
+LLM, no per-user state, no job lock. One shape, one artifact:
+
+```
+unsatisfiedCitationDemand  (SQL)   citation_demand → aggregate across ALL users by
+                                    DISTINCT citing article → map each ref to the stable
+                                    id it would occupy (merging '2301.03728' with
+                                    '2301.03728v2') → keep ≥ --min-citers → drop refs
+                                    whose stable id already exists → then --limit
+resolveDemandRefs          (HTTP)  arXiv Atom, batched ~20 ids/request with an explicit
+                                    max_results; Crossref one DOI at a time. ~1 req/s,
+                                    15s timeout, 429/5xx retryable, everything else a
+                                    counted reason. Nothing throws per ref
+renderDemandArticles       (pure)  ONE <date>-demand-articles.md into $CHIYA_SHARED_INBOX
+                                    in the exact matcha format parseArticles reads
+```
+
+Satisfaction is **computed, never stored**: a ref is satisfied when `stableIdForUrl` of
+its canonical URL (`https://arxiv.org/abs/<id>` / `https://doi.org/<doi>`) already has a
+`shared_article` row. Those are the same two URL forms `librarian-apply` writes into
+`## External references`, and the same helper `lint`'s `resolve-external-refs` maps them
+back with — one mapping, three call sites, no forks. It is also why the emitted article
+dedups against a copy that later arrives through normal collection rather than creating a
+second page.
+
+From there the shared pipeline owns everything: absorb dedups, enrich fetches full text,
+the quality gate can still reject the paper, routing distributes it. Because the only
+side effect is that additive inbox file, the job defaults to **executing**; `--dry-run`
+stops before metadata resolution, so it is offline and free. Flags: `--min-citers=N`
+(3), `--limit=N` (25), `--user=<handle>`, `--dry-run`. Re-running the same day overwrites
+the file, which is safe — anything in the earlier write is still unsatisfied and is
+recomputed. Run summary:
+`[demand] eligible=.. satisfied-skipped=.. unmapped=.. considered=.. resolved=.. emitted=.. failed=..`.
+
 ### intake.ts (retired)
 
 The single-tenant intake (scan `vault/raw/inbox` → ArticleStore → archive) is absorbed into the shared pipeline's absorb phase. `npm run intake` and the code remain for legacy single-tenant deployments, but the live system does not run it. Its recovery script is still current: if a per-user ArticleStore is lost/reset while raw inbox archives remain, recover dedup memory with `npm run backfill-archive-articles -- --status=done`, or re-queue archived resources for graph curation with `-- --status=pending`.
@@ -196,6 +262,10 @@ The vault's "organize" organ. Multi-tenant, same shape as `librarian.ts`: one se
 scanVault           (pure)   one walk of wiki/sources + wiki/topics + wiki/entities into
                               LintCtx: frontmatter, wikilinks, member lists, cite in-degree.
                               The only reader of page bodies; every later pass works off ctx
+resolveExternalRefs (pure)   `## External references` entries whose paper has since landed
+                              migrate into `## Cited references in this library` + `cites:`,
+                              the target gains a `## Cited by` bullet, and ctx is updated in
+                              place so the passes below see the new edges without a rescan
 regenRegistry       (pure)   wiki/topics/_registry.md (human) + registry.json (machine —
                               this is the vocabulary the librarian's agents read)
 recountCitations    (pure)   cited_by: ← inbound `cites:` edges, one frontmatter line
@@ -212,7 +282,21 @@ reportLint          (pure)   broken links / orphan sources / stub topics / near-
 commitLint          (pure)   one commit per run, pathspecs filtered to what exists
 ```
 
-Every write goes through `planWrite`, which content-compares first: a run over an unchanged vault produces zero writes and `commitLint` short-circuits before touching git, so a daily timer cannot churn history or mtimes. `scanVault` is read-only and runs outside the lock; the seven mutating passes (plus `log.md` and the commit) run inside `VaultMutationLock`. `--dry-run` reports every would-write and the full report without touching the vault, log.md, or git — and skips the lock, since it writes nothing. Live measurements on the 21.9k-source velvet vault: full pipeline ~12s, of which the scan is 0.3s and a worst-case (every page stale) recount is 11s; `ctx.heartbeat()` fires every 500 files inside the scan and recount loops so long runs are not reclaimed as abandoned.
+`resolveExternalRefs` runs FIRST among the mutating passes, and the ordering is
+load-bearing: before `regenRegistry` so `registry.json`'s `citedByTotal` carries this
+run's new edges, before `recountCitations` so they land in `cited_by`, before
+`rankTopicMembers` so member lists already reflect the new importance, before
+`exportGraph` so `graph.json` is not a day stale. It is the closing half of demand-driven
+ingestion — fetching a demanded paper is pointless if it arrives disconnected from the
+pages that asked for it. Refusal over repair: a `## External references` section or a
+`cites:` key that is not the shape the writers emit freezes the page (skipped, counted,
+reported as `lint-unparseable-external-refs`), and a ref URL that is neither arXiv nor
+DOI has no stable identity to match on, so it stays external. A paper's own arXiv
+DataCite DOI (`10.48550/arxiv.<own id>`) is rejected in both directions — 109 of velvet's
+1,631 live external entries are exactly that, and resolving one would draw a citation
+edge from a paper to itself.
+
+Every write goes through `planWrite`, which content-compares first: a run over an unchanged vault produces zero writes and `commitLint` short-circuits before touching git, so a daily timer cannot churn history or mtimes. `scanVault` is read-only and runs outside the lock; the eight mutating passes (plus `log.md` and the commit) run inside `VaultMutationLock`. `--dry-run` reports every would-write and the full report without touching the vault, log.md, or git — and skips the lock, since it writes nothing. Live measurements on the 21.9k-source velvet vault: full pipeline ~12s, of which the scan is 0.3s and a worst-case (every page stale) recount is 11s; `ctx.heartbeat()` fires every 500 files inside the scan and recount loops so long runs are not reclaimed as abandoned.
 
 The first apply run is the expensive one: ~21.8k legacy source pages have no `cited_by:` key at all and each gains one, in a single commit. Run `--dry-run` first.
 
@@ -222,15 +306,24 @@ Implementation is split under `src/phases/digest/` (`context`, `load-articles`, 
 
 ```
 loadContext         (pure)   read CLAUDE.md, TASTE.md, index, log tail, focuses, research/STATUS
-loadArticles        (pure)   query ArticleStore by collected-on-{date}
+loadArticles        (pure)   query ArticleStore by collected-on-{date}, `digested_at IS NULL`
 prioritize          (LLM)    classify each article: focus / notable / followup / skip
 draftSections       (LLM)    one writer per article-driven section
 assemble            (pure)   format final markdown plus deterministic HTML email
 appendLog           (pure)   record digest entry in vault/log.md
 commitDigest        (pure)   local git commit
 squashAndPush       (pure)   fetch → squash unpushed local commits → push to origin
-emailSend           (pure)   gws gmail +send (--html when HTML body is available); throws on send failure
+emailSend           (pure)   gws gmail +send (--html when HTML body is available); throws on
+                              send failure, then stamps digested_at on what it just mailed
 ```
+
+AM/PM dedup: `digested_at` (additive-nullable column, lands on the next DB open) is what
+makes the two runs different rather than the same run twice. `load-articles` takes only
+undigested rows inside the existing local-day window — the 3-day fallback too — and
+`email-send` stamps exactly the rows it loaded, **after** the `!result.ok` throw, so a
+failed send leaves everything eligible for the next firing. Skips are stamped as well: a
+`skip` verdict consumed the article just as much as a highlight did. `appendLog`'s
+once-daily `[date] direction` marker is untouched and still idempotent per run.
 
 Email format: the digest keeps a Markdown/plain-text body for logs and fallback, but sends a deterministic HTML fragment when available. Article titles are rendered as embedded links to the original collected source URL; all article/model text is HTML-escaped in TypeScript, and the LLM is never asked to generate HTML. OSF API preprint URLs are converted to human-readable `https://osf.io/<slug>` links, and Zenodo bare record IDs are converted to `https://zenodo.org/records/<id>` before rendering/backfill storage.
 

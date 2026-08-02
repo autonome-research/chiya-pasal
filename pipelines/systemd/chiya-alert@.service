@@ -1,0 +1,20 @@
+[Unit]
+Description=Chiya failure alert for %i
+Documentation=https://github.com/Code4me2/chiya-library
+# Deliberately NO OnFailure= here. This unit is the failure handler; pointing
+# it at itself would recurse, and alert-failure.sh is written to exit 0 in
+# every path anyway, so there is nothing to hand off to.
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/chiya-library/pipelines
+# %i is the failed unit's full name, passed through by OnFailure=chiya-alert@%n.service
+# (e.g. chiya-digest@AM.service). The script reads its last 30 journal lines.
+ExecStart=%h/chiya-library/pipelines/scripts/alert-failure.sh "%i"
+# Supplies CHIYA_ALERT_EMAIL (preferred) / CHIYA_EMAIL_TO (fallback); the
+# leading `-` keeps the unit valid on hosts that haven't set up the file yet.
+EnvironmentFile=-%h/chiya-library/pipelines/.env
+StandardOutput=journal
+StandardError=journal
+# One journal read plus one gws send. The script itself caps gws at 60s.
+TimeoutStartSec=180

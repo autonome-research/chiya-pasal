@@ -49,6 +49,15 @@ Shared pipeline (once per article, not per user)
     → route (embedding cosine-match, or broadcast while embeddings are down)
     → COPY into each matched user's ArticleStore
 
+Demand ingestion (daily, all users — tier 3)
+  shared citation_demand ledger
+    → aggregate by DISTINCT citing article, merge refs naming the same paper
+    → drop refs whose stable id already exists (satisfaction is COMPUTED)
+    → arXiv/Crossref metadata
+    → ONE <date>-demand-articles.md into the shared inbox
+  (no vault, no git, no LLM — the vault proposes via citation counts, and the
+   shared pipeline's normal quality gate still disposes)
+
 Librarian (per enabled user in config/users.yaml)
   that user's pending articles
     → load topic vocabulary once (registry.json, else a live scan)
@@ -64,6 +73,9 @@ Librarian (per enabled user in config/users.yaml)
 
 Lint (per enabled user)
   one scan of that user's vault
+    → resolve external refs whose paper has since landed into real cites
+      (the closing half of demand ingestion; runs first so every pass below
+       sees the new edges in the same run, without a rescan)
     → regen registry (wiki/topics/_registry.md + registry.json)
     → recount cited_by from inbound cites:
     → re-rank topic member lists by importance
@@ -73,12 +85,13 @@ Lint (per enabled user)
     → one commit
 
 Digest (per enabled user)
-  that user's ArticleStore + vault context
+  that user's undigested ArticleStore rows + vault context
     → classify
     → draft sections
     → append log
     → commit/squash/push
-    → email that user
+    → email that user, then stamp digested_at on exactly what was mailed
+      (so PM is not a verbatim repeat of AM, and a failed send consumes nothing)
 ```
 
 Each user's vault is its own git repo at `~/chiya-data/users/<handle>/vault`

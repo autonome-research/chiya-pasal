@@ -1,0 +1,18 @@
+[Unit]
+Description=Chiya demand ingestion — daily most-wanted citation fetch
+
+[Timer]
+# 05:10 local: after the 00:15 lint pass (so the ledger's citation counts and
+# the registry are settled) and before the 06:30 AM digest, giving the shared
+# pipeline's 05:37 tick a chance to absorb the emitted file the same morning.
+# Deliberately off the :07/:37 shared cadence and the librarian's 10-minute
+# cadence — nothing here takes the vault lock, but staying off the tick keeps
+# the journal readable.
+OnCalendar=*-*-* 05:10:00
+# A skipped day is a day the most-demanded papers stay missing; catch up after
+# a reboot or a suspended host.
+Persistent=true
+Unit=chiya-demand.service
+
+[Install]
+WantedBy=timers.target

@@ -1,2 +1,6 @@
 config/users.yaml
 .rebuild-better-sqlite3.lock
+
+# Repair/demand scripts write *-articles.md drop-ins to cwd before the
+# operator copies them to the shared inbox — data artifacts, never code.
+/*-articles.md

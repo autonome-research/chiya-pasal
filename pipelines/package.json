@@ -15,6 +15,7 @@
     "vault-lint": "tsx src/lint.ts",
     "intake": "tsx src/intake.ts",
     "shared": "tsx src/shared-pipeline.ts",
+    "demand-ingest": "tsx src/demand-ingest.ts",
     "doctor": "tsx src/doctor.ts",
     "status": "tsx src/status.ts",
     "admin": "tsx src/admin.ts",
@@ -24,6 +25,8 @@
     "repair-error-summaries": "tsx scripts/repair-error-summaries.ts",
     "migrate-topics": "tsx scripts/migrate-topics.ts",
     "backfill-topic-clusters": "tsx scripts/backfill-topic-clusters.ts",
+    "backfill-clusters-llm": "tsx scripts/backfill-clusters-llm.ts",
+    "fix-extensionless-pages": "tsx scripts/fix-extensionless-pages.ts",
     "api-ingest": "tsx src/collection/api-ingest.ts"
   },
   "dependencies": {

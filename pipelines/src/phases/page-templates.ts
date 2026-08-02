@@ -479,5 +479,226 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// ---------------------------------------------------------------------------
+// Retroactive citation resolution (lint's `resolve-external-refs` pass)
+// ---------------------------------------------------------------------------
+//
+// A source page records the references that were NOT in the library at write
+// time under `## External references`. When the referenced paper later lands,
+// that entry has to migrate to `## Cited references in this library` (plus the
+// `cites:` frontmatter, plus a `## Cited by` bullet on the target). These
+// helpers do the section surgery; the lint pass owns the decision of WHICH
+// entries have become resolvable.
+//
+// Every helper is line-based and conservative: lines it does not recognise are
+// preserved verbatim, and a section it cannot parse makes the helper refuse
+// (null) rather than guess. Nothing here re-renders a page from scratch — a
+// source page carries a summary the pipeline can no longer reproduce.
+
+export const EXTERNAL_REFS_HEADING = '## External references';
+export const CITED_REFS_HEADING = '## Cited references in this library';
+/** Placeholder formatSourcePage writes when nothing resolved at birth. */
+export const CITED_REFS_PLACEHOLDER = '_None resolved against the current library._';
+
+/** Sections `appendCitedReference` inserts before, in canonical page order. */
+const CITED_REFS_FOLLOWERS = [EXTERNAL_REFS_HEADING, '## Related sources', '## Cited by'];
+
+/** The exact line shape formatSourcePage emits. The `— not yet in library`
+ *  suffix is optional so an entry an operator trimmed still parses, but
+ *  anything else in the section is treated as hand-written and freezes the
+ *  page (see `parseExternalRefs`). */
+const EXTERNAL_REF_LINE_RE = /^- \[([^\]]+)\]\(([^)\s]+)\)(?: — not yet in library)?$/;
+
+const CITED_REF_LINE_RE = /^- \[\[wiki\/sources\/([^\]|#]+?)\]\]/;
+
+export interface ParsedExternalRef {
+  /** Display label, e.g. `arXiv:2605.03823`. */
+  label: string;
+  url: string;
+}
+
+export type ExternalRefsSection =
+  | { status: 'absent' }
+  /** The heading is there but the body is not ours to rewrite. */
+  | { status: 'unparseable' }
+  | { status: 'present'; entries: ParsedExternalRef[] };
+
+/** Heading line index and the index one past its last body line. A section
+ *  ends at the next `## ` heading (an `### ` inside a demoted summary does
+ *  not match) or at end of file. */
+function sectionBounds(
+  lines: string[],
+  heading: string,
+): { header: number; end: number } | null {
+  const header = lines.findIndex((l) => l.trimEnd() === heading);
+  if (header < 0) return null;
+  let end = lines.length;
+  for (let i = header + 1; i < lines.length; i++) {
+    if (lines[i]!.startsWith('## ')) {
+      end = i;
+      break;
+    }
+  }
+  return { header, end };
+}
+
+export function parseExternalRefs(text: string): ExternalRefsSection {
+  const lines = text.split('\n');
+  const bounds = sectionBounds(lines, EXTERNAL_REFS_HEADING);
+  if (!bounds) return { status: 'absent' };
+
+  const entries: ParsedExternalRef[] = [];
+  for (let i = bounds.header + 1; i < bounds.end; i++) {
+    const line = lines[i]!.trimEnd();
+    if (line.trim() === '') continue;
+    const m = EXTERNAL_REF_LINE_RE.exec(line);
+    if (!m) return { status: 'unparseable' };
+    entries.push({ label: m[1]!, url: m[2]! });
+  }
+  return { status: 'present', entries };
+}
+
+/**
+ * Drop the external-reference entries whose URL is in `urls`.
+ *
+ * Returns null when the section is absent or unparseable — the caller must
+ * skip the page rather than write a partially-understood rewrite. Kept entries
+ * keep their original line text byte-for-byte. When the last entry leaves, the
+ * heading goes with it: an empty `## External references` block would read as
+ * "this paper cites nothing outside the library", which is a lie.
+ */
+export function removeExternalRefs(
+  text: string,
+  urls: Set<string>,
+): { text: string; removed: number; emptied: boolean } | null {
+  const lines = text.split('\n');
+  const bounds = sectionBounds(lines, EXTERNAL_REFS_HEADING);
+  if (!bounds) return null;
+
+  const kept: string[] = [];
+  let removed = 0;
+  for (let i = bounds.header + 1; i < bounds.end; i++) {
+    const line = lines[i]!;
+    if (line.trim() === '') continue;
+    const m = EXTERNAL_REF_LINE_RE.exec(line.trimEnd());
+    if (!m) return null;
+    if (urls.has(m[2]!)) {
+      removed++;
+      continue;
+    }
+    kept.push(line);
+  }
+  if (removed === 0) return { text, removed: 0, emptied: false };
+
+  if (kept.length === 0) {
+    const before = lines.slice(0, bounds.header);
+    const after = lines.slice(bounds.end);
+    // Keep one blank line between the surviving neighbours when the layout
+    // did not already have one ahead of the heading.
+    if (
+      after.length > 0 &&
+      before.length > 0 &&
+      before[before.length - 1]!.trim() !== ''
+    ) {
+      before.push('');
+    }
+    return { text: [...before, ...after].join('\n'), removed, emptied: true };
+  }
+
+  const rebuilt = [lines[bounds.header]!, '', ...kept];
+  if (bounds.end < lines.length) rebuilt.push('');
+  return {
+    text: [...lines.slice(0, bounds.header), ...rebuilt, ...lines.slice(bounds.end)].join('\n'),
+    removed,
+    emptied: false,
+  };
+}
+
+/**
+ * Add `- [[wiki/sources/<name>]]` to `## Cited references in this library`.
+ *
+ * Idempotent: a page already listing that source comes back untouched. The
+ * section is created in its canonical position (before external refs / related
+ * sources / cited by) when a page predates it, and the `_None resolved…_`
+ * placeholder is dropped as soon as there is something to list.
+ */
+export function appendCitedReference(text: string, sourceName: string): string {
+  const line = `- [[wiki/sources/${sourceName}]]`;
+  const lines = text.split('\n');
+  const bounds = sectionBounds(lines, CITED_REFS_HEADING);
+
+  if (bounds) {
+    const kept: string[] = [];
+    for (let i = bounds.header + 1; i < bounds.end; i++) {
+      const l = lines[i]!;
+      if (l.trim() === '' || l.trim() === CITED_REFS_PLACEHOLDER) continue;
+      const m = CITED_REF_LINE_RE.exec(l.trim());
+      if (m && m[1]!.trim() === sourceName) return text;
+      kept.push(l);
+    }
+    kept.push(line);
+    const rebuilt = [lines[bounds.header]!, '', ...kept];
+    if (bounds.end < lines.length) rebuilt.push('');
+    return [...lines.slice(0, bounds.header), ...rebuilt, ...lines.slice(bounds.end)].join('\n');
+  }
+
+  for (const follower of CITED_REFS_FOLLOWERS) {
+    const idx = lines.findIndex((l) => l.trimEnd() === follower);
+    if (idx < 0) continue;
+    return [
+      ...lines.slice(0, idx),
+      CITED_REFS_HEADING,
+      '',
+      line,
+      '',
+      ...lines.slice(idx),
+    ].join('\n');
+  }
+
+  const head = [...lines];
+  while (head.length > 0 && head[head.length - 1]!.trim() === '') head.pop();
+  return [...head, '', CITED_REFS_HEADING, '', line, ''].join('\n');
+}
+
+/**
+ * Append a value to an inline-array frontmatter key, deduped.
+ *
+ * Returns null when there is no frontmatter block, or when the key exists in a
+ * shape this parser does not own (a block list, a scalar). The caller treats
+ * that as "skip this page" — silently converting a block list to an inline one
+ * would rewrite frontmatter the pass was never asked to touch.
+ */
+export function addToFrontmatterInlineList(
+  text: string,
+  key: string,
+  value: string,
+): string | null {
+  const split = splitFrontmatter(text);
+  if (!split) return null;
+  const existing = readInlineArray(split.fmLines, key);
+  if (existing === null) {
+    if (split.fmLines.some((l) => l.startsWith(`${key}:`))) return null;
+    return bumpFrontmatterField(text, key, yamlInlineArray([value]));
+  }
+  if (existing.includes(value)) return text;
+  return bumpFrontmatterField(text, key, yamlInlineArray([...existing, value]));
+}
+
+/**
+ * The page name an external reference WOULD have if it were in the library.
+ *
+ * Deliberately routed through `stableIdForUrl`/`stableIdToFilename` — the same
+ * two functions the librarian names its source pages with — so a resolution
+ * here can never disagree with what apply wrote. A URL that is neither arXiv
+ * nor DOI has no stable identity to match against (its `url-<hash>` name
+ * depends on the exact URL the article was collected from), so it stays an
+ * external reference.
+ */
+export function stableNameForRefUrl(url: string): string | null {
+  const id = stableIdForUrl(url);
+  if (!id || id.kind === 'url') return null;
+  return stableIdToFilename(id);
+}
+
 // Re-exported for tests that want to inspect the inline-array reader.
 export const _internal = { readInlineArray, splitFrontmatter };

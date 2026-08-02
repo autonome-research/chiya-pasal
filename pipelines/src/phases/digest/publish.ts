@@ -4,9 +4,10 @@ import { requireCtx, type Phase } from 'thread-phase';
 
 import type { DigestCtx } from '../../shared/digest-types.js';
 import type { ChiyaEnv } from '../../shared/env.js';
-import { gwsEmailSend } from '../../tools/email.js';
+import { gwsEmailSend, type EmailMessage } from '../../tools/email.js';
 import { GitOps } from '../../tools/git.js';
 import { VaultFs } from '../../tools/vault.js';
+import type { DigestSelection } from './load-articles.js';
 
 export const appendLog = (vault: VaultFs): Phase<DigestCtx> => ({
   name: 'append-log',
@@ -67,12 +68,29 @@ export const squashAndPush = (git: GitOps): Phase<DigestCtx> => ({
   },
 });
 
-export const emailSend = (env: ChiyaEnv): Phase<DigestCtx> => ({
+/** The one ArticleStore capability email-send needs; keeps the tests fake-able. */
+export interface DigestedMarker {
+  markDigested(ids: number[]): number;
+}
+
+export interface EmailSendDeps {
+  /** Transport seam — defaults to the real `gws gmail +send`. */
+  send?: (msg: EmailMessage) => Promise<{ ok: boolean; output: string }>;
+  /**
+   * Consumption ledger. When present, every article this digest loaded (the
+   * whole classified set — a `skip` verdict consumed the article just as
+   * much as a highlight did) is stamped `digested_at` once the mail is out.
+   */
+  digested?: { store: DigestedMarker; selection: DigestSelection };
+}
+
+export const emailSend = (env: ChiyaEnv, deps: EmailSendDeps = {}): Phase<DigestCtx> => ({
   name: 'email-send',
   async *run(ctx) {
     const digest = requireCtx(ctx, 'digest', 'email-send');
     const html = ctx.digestHtml;
-    const result = await gwsEmailSend({
+    const send = deps.send ?? gwsEmailSend;
+    const result = await send({
       to: env.emailTo,
       subject: `🍵 Chiya Daily Digest — ${ctx.date} (${ctx.direction})`,
       body: html ?? digest,
@@ -86,7 +104,20 @@ export const emailSend = (env: ChiyaEnv): Phase<DigestCtx> => ({
       detail: result.output.slice(0, 200),
     };
     if (!result.ok) {
+      // Deliberately BEFORE marking: an article is only "digested" once the
+      // user could actually read it. A failed send leaves every row eligible
+      // for the next timer firing.
       throw new Error(`email-failed: ${result.output.slice(0, 500)}`);
+    }
+
+    if (deps.digested) {
+      const marked = deps.digested.store.markDigested(deps.digested.selection.ids);
+      yield {
+        type: 'agent_activity',
+        agent: 'email-send',
+        action: 'marked-digested',
+        detail: `${marked} article(s) stamped digested_at`,
+      };
     }
   },
 });

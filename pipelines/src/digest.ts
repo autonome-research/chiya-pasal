@@ -46,6 +46,10 @@ import {
   prioritize,
   squashAndPush,
 } from './phases/digest-phases.js';
+// The AM/PM consumption ledger: load-articles fills the selection, email-send
+// stamps it. Imported from the leaf module because it is plumbing between two
+// phases rather than a phase itself.
+import { createDigestSelection } from './phases/digest/load-articles.js';
 import type { DigestCtx, DigestDirection } from './shared/digest-types.js';
 
 function todayLocal(): string {
@@ -113,9 +117,14 @@ async function runForTenant(
   const store = new SqliteJobStore(dbPath);
   const runner = new JobRunner(store, { heartbeatMs: 30_000 });
 
+  // Articles this run consumed. Stamped digested_at by email-send on success,
+  // so the PM run sees only what arrived after the AM mail went out — and a
+  // failed send leaves everything eligible for the next firing.
+  const selection = createDigestSelection();
+
   const phases = [
     loadContext(vault, env.interests),
-    loadArticles(articleStore),
+    loadArticles(articleStore, selection),
     prioritize(fastClient, env.fast.model),
     draftSections(fastClient, env.fast.model),
     assemble,
@@ -124,7 +133,7 @@ async function runForTenant(
       [appendLog(vault), commitDigest(git), squashAndPush(git)],
       'digest-vault-mutation',
     ),
-    emailSend(env),
+    emailSend(env, { digested: { store: articleStore, selection } }),
   ];
 
   const runController = new AbortController();

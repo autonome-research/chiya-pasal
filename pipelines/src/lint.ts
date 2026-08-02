@@ -1,5 +1,6 @@
 /**
  * Lint entry point. The lint pipeline is the vault's "organize" organ: it
+ * resolves external references whose paper has since landed into real cites,
  * regenerates the derived views (topic registry, index, graph), corrects the
  * counters the writers cannot maintain incrementally (`cited_by`), re-orders
  * topic member lists by importance, and reports structural problems (broken
@@ -29,6 +30,7 @@ import { GitOps } from './tools/git.js';
 import { VaultFs } from './tools/vault.js';
 import {
   scanVault,
+  resolveExternalRefs,
   regenRegistry,
   recountCitations,
   rankTopicMembers,
@@ -110,6 +112,10 @@ async function runForTenant(label: string, env: ChiyaEnv, args: Args): Promise<R
   // that touches the working tree (page rewrites, log.md, the commit) runs
   // inside it so the librarian and digest never see a half-written vault.
   const mutating = [
+    // First: external refs whose paper has since landed become real cites, so
+    // the registry, the recount, the re-rank and the graph all see this run's
+    // new edges instead of tomorrow's.
+    resolveExternalRefs(vault),
     regenRegistry(vault),
     recountCitations(vault),
     rankTopicMembers(vault),

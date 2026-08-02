@@ -7,6 +7,7 @@ import { PipelineCache, type Phase } from 'thread-phase';
 import {
   scanVault,
   regenRegistry,
+  resolveExternalRefs,
   recountCitations,
   rankTopicMembers,
   regenIndex,
@@ -23,6 +24,11 @@ import {
   LINT_PATHSPECS,
   type LintCtx,
 } from '../src/phases/lint-phases.js';
+import {
+  formatSourcePage,
+  stableIdForUrl,
+  stableIdToFilename,
+} from '../src/phases/page-templates.js';
 import { VaultFs } from '../src/tools/vault.js';
 import type { GitOps } from '../src/tools/git.js';
 import type { TopicRegistry, TopicRecord } from '../src/shared/topic-registry.js';
@@ -132,6 +138,55 @@ function topic(slug: string, opts: TopicOpts = {}): void {
   }
   body.push('');
   writeFileSync(join(dir, 'wiki/topics', `${slug}.md`), `${fm.join('\n')}\n${body.join('\n')}`);
+}
+
+interface ArxivSourceOpts {
+  title?: string;
+  collected?: string;
+  topics?: string[];
+  cites?: string[];
+  /** arXiv ids rendered under `## External references`. */
+  refs?: string[];
+  /** DOIs rendered under `## External references`. */
+  doiRefs?: string[];
+}
+
+/**
+ * A source page written by the REAL producer.
+ *
+ * The resolution pass has to recognise what the librarian wrote — section
+ * order, the `— not yet in library` suffix, the stable-id naming — so the
+ * fixture goes through `formatSourcePage` and the same stable-id helpers
+ * rather than re-implementing the format here. Returns the page name.
+ */
+function arxivSource(arxivId: string, opts: ArxivSourceOpts = {}): string {
+  const url = `https://arxiv.org/abs/${arxivId}`;
+  const stableId = stableIdForUrl(url)!;
+  const filename = stableIdToFilename(stableId);
+  const content = formatSourcePage({
+    stableId,
+    url,
+    arxivId,
+    sourceName: 'arXiv',
+    collected: new Date(`${opts.collected ?? '2026-07-01'}T00:00:00Z`),
+    title: opts.title ?? arxivId,
+    field: 'AI/ML',
+    topics: opts.topics ?? [],
+    cites: opts.cites ?? [],
+    externalRefs: [
+      ...(opts.refs ?? []).map((id) => ({
+        label: `arXiv:${id}`,
+        url: `https://arxiv.org/abs/${id}`,
+      })),
+      ...(opts.doiRefs ?? []).map((doi) => ({
+        label: `doi:${doi}`,
+        url: `https://doi.org/${doi}`,
+      })),
+    ],
+    summary: 'A summary paragraph.',
+  });
+  writeFileSync(join(dir, 'wiki/sources', `${filename}.md`), content);
+  return filename;
 }
 
 /** Every file in the fixture vault, path → contents. */
@@ -307,6 +362,344 @@ describe('recount-citations', () => {
     source('b');
     await drain([scanVault(vault), recountCitations(vault)], makeCtx());
     expect(read('wiki/sources/b.md')).toContain('cited_by: 1');
+  });
+});
+
+describe('resolve-external-refs', () => {
+  type Ev = { phase?: string; key?: string; counts?: Record<string, number>; value?: unknown };
+  const countsOf = (events: unknown[]): Record<string, number> =>
+    (events as Ev[]).find((e) => e.phase === 'resolve-external-refs')!.counts!;
+
+  it('migrates a landed ref into cites, the in-library section, and the target Cited by', async () => {
+    const target = arxivSource('2605.03823', { title: 'Landed Paper' });
+    // The second ref never landed and must survive untouched.
+    const citer = arxivSource('2607.00001', {
+      title: 'Citing Paper',
+      refs: ['2605.03823', '2601.09999'],
+    });
+
+    const ctx = makeCtx();
+    const events = await drain([scanVault(vault), resolveExternalRefs(vault)], ctx);
+
+    const page = read(`wiki/sources/${citer}.md`);
+    expect(page).toContain(`cites: [${target}]`);
+    expect(page).toContain(`- [[wiki/sources/${target}]]`);
+    expect(page).not.toContain('_None resolved against the current library._');
+    expect(page).not.toContain('arXiv:2605.03823');
+    expect(page).toContain('## External references');
+    expect(page).toContain(
+      '- [arXiv:2601.09999](https://arxiv.org/abs/2601.09999) — not yet in library',
+    );
+
+    expect(read(`wiki/sources/${target}.md`)).toContain(
+      `- [[wiki/sources/${citer}]] — Citing Paper`,
+    );
+
+    // In-memory records carry the new edge for the passes that follow.
+    const record = ctx.sources!.find((s) => s.name === citer)!;
+    expect(record.cites).toEqual([target]);
+    expect(record.externalRefs.map((r) => r.label)).toEqual(['arXiv:2601.09999']);
+    expect(record.links).toContain(`wiki/sources/${target}`);
+    expect(ctx.inDegree!.get(target)).toBe(1);
+
+    expect(countsOf(events)).toMatchObject({
+      pagesResolved: 1,
+      edgesAdded: 1,
+      sectionsEmptied: 0,
+      skippedUnparseable: 0,
+    });
+  });
+
+  it('preserves the rest of the citing page byte-for-byte', async () => {
+    arxivSource('2605.03823');
+    const citer = arxivSource('2607.00001', { refs: ['2605.03823', '2601.09999'] });
+    const before = read(`wiki/sources/${citer}.md`);
+
+    await drain([scanVault(vault), resolveExternalRefs(vault)], makeCtx());
+    const after = read(`wiki/sources/${citer}.md`);
+
+    // Only the three touched lines differ: the cites: frontmatter, the moved
+    // entry, and the placeholder it replaced.
+    const strip = (t: string): string[] =>
+      t
+        .split('\n')
+        .filter(
+          (l) =>
+            !l.startsWith('cites:') &&
+            !l.startsWith('- [[wiki/sources/') &&
+            !l.startsWith('- [arXiv:2605.03823]') &&
+            l !== '_None resolved against the current library._',
+        );
+    expect(strip(after)).toEqual(strip(before));
+  });
+
+  it('drops the External references heading when the last entry leaves', async () => {
+    const target = arxivSource('2605.03823');
+    const citer = arxivSource('2607.00001', { refs: ['2605.03823'] });
+
+    const events = await drain([scanVault(vault), resolveExternalRefs(vault)], makeCtx());
+    const page = read(`wiki/sources/${citer}.md`);
+
+    expect(page).not.toContain('## External references');
+    expect(page).toContain(
+      `## Cited references in this library\n\n- [[wiki/sources/${target}]]\n\n## Related sources`,
+    );
+    expect(countsOf(events)).toMatchObject({ pagesResolved: 1, sectionsEmptied: 1 });
+  });
+
+  it('resolves one of three refs and leaves the other two external', async () => {
+    const target = arxivSource('2605.03823');
+    const citer = arxivSource('2607.00001', {
+      refs: ['2601.09998', '2605.03823', '2601.09999'],
+    });
+
+    const events = await drain([scanVault(vault), resolveExternalRefs(vault)], makeCtx());
+    const page = read(`wiki/sources/${citer}.md`);
+    const external = page.slice(page.indexOf('## External references'));
+
+    expect(external.split('\n').filter((l) => l.startsWith('- ['))).toEqual([
+      '- [arXiv:2601.09998](https://arxiv.org/abs/2601.09998) — not yet in library',
+      '- [arXiv:2601.09999](https://arxiv.org/abs/2601.09999) — not yet in library',
+    ]);
+    expect(page).toContain(`cites: [${target}]`);
+    expect(countsOf(events)).toMatchObject({
+      pagesResolved: 1,
+      edgesAdded: 1,
+      sectionsEmptied: 0,
+    });
+  });
+
+  it('creates the in-library section in canonical position on a page that lacks it', async () => {
+    const target = arxivSource('2605.03823');
+    const citer = arxivSource('2607.00001', { refs: ['2605.03823', '2601.09999'] });
+    const path = join(dir, 'wiki/sources', `${citer}.md`);
+    writeFileSync(
+      path,
+      readFileSync(path, 'utf8').replace(
+        '## Cited references in this library\n\n_None resolved against the current library._\n\n',
+        '',
+      ),
+    );
+
+    await drain([scanVault(vault), resolveExternalRefs(vault)], makeCtx());
+
+    // Between Topics and External references, where formatSourcePage puts it.
+    expect(read(`wiki/sources/${citer}.md`)).toContain(
+      `## Cited references in this library\n\n- [[wiki/sources/${target}]]\n\n## External references`,
+    );
+  });
+
+  it('resolves DOI refs through the same stable-id naming as the librarian', async () => {
+    const doi = '10.1038/s41586-024-00001';
+    const doiUrl = `https://doi.org/${doi}`;
+    const stableId = stableIdForUrl(doiUrl)!;
+    const target = stableIdToFilename(stableId);
+    writeFileSync(
+      join(dir, 'wiki/sources', `${target}.md`),
+      formatSourcePage({
+        stableId,
+        url: doiUrl,
+        doi,
+        sourceName: 'journal',
+        collected: new Date('2026-07-01T00:00:00Z'),
+        title: 'Landed DOI Paper',
+        field: 'bio',
+        topics: [],
+        cites: [],
+        summary: 'A summary paragraph.',
+      }),
+    );
+    const citer = arxivSource('2607.00001', { doiRefs: [doi] });
+
+    await drain([scanVault(vault), resolveExternalRefs(vault)], makeCtx());
+    expect(target).toBe('doi-10-1038-s41586-024-00001');
+    expect(read(`wiki/sources/${citer}.md`)).toContain(`cites: [${target}]`);
+    expect(read(`wiki/sources/${target}.md`)).toContain(`- [[wiki/sources/${citer}]]`);
+  });
+
+  it('is idempotent: a second run over the resolved vault writes nothing', async () => {
+    arxivSource('2605.03823');
+    arxivSource('2607.00001', { refs: ['2605.03823', '2601.09999'] });
+    await drain([scanVault(vault), resolveExternalRefs(vault)], makeCtx());
+    const after = snapshot();
+
+    const ctx = makeCtx();
+    const events = await drain([scanVault(vault), resolveExternalRefs(vault)], ctx);
+
+    expect(snapshot()).toEqual(after);
+    expect(ctx.writes?.written ?? []).toEqual([]);
+    expect(countsOf(events)).toMatchObject({ pagesResolved: 0, edgesAdded: 0 });
+  });
+
+  it('refuses to touch a page whose External references section it cannot parse', async () => {
+    arxivSource('2605.03823');
+    const citer = arxivSource('2607.00001', { refs: ['2605.03823'] });
+    const path = join(dir, 'wiki/sources', `${citer}.md`);
+    writeFileSync(
+      path,
+      readFileSync(path, 'utf8').replace(
+        '## External references\n\n',
+        '## External references\n\nHand-written note about these refs.\n\n',
+      ),
+    );
+    const before = read(`wiki/sources/${citer}.md`);
+
+    const ctx = makeCtx();
+    const events = (await drain(
+      [scanVault(vault), resolveExternalRefs(vault)],
+      ctx,
+    )) as Ev[];
+
+    expect(read(`wiki/sources/${citer}.md`)).toBe(before);
+    expect(ctx.writes?.written ?? []).toEqual([]);
+    expect(countsOf(events)).toMatchObject({ pagesResolved: 0, skippedUnparseable: 1 });
+    expect(events.find((e) => e.key === 'lint-unparseable-external-refs')!.value).toEqual([
+      citer,
+    ]);
+  });
+
+  it('refuses a page whose cites frontmatter is not the inline array the writers emit', async () => {
+    arxivSource('2605.03823');
+    const citer = arxivSource('2607.00001', { refs: ['2605.03823'] });
+    const path = join(dir, 'wiki/sources', `${citer}.md`);
+    writeFileSync(
+      path,
+      readFileSync(path, 'utf8').replace('cites: []\n', 'cites:\n  - some-legacy-name\n'),
+    );
+    const before = read(`wiki/sources/${citer}.md`);
+
+    const events = await drain([scanVault(vault), resolveExternalRefs(vault)], makeCtx());
+
+    expect(read(`wiki/sources/${citer}.md`)).toBe(before);
+    expect(countsOf(events)).toMatchObject({ pagesResolved: 0, skippedUnparseable: 1 });
+  });
+
+  it('leaves refs alone when the paper is still missing or carries no stable identity', async () => {
+    const citer = arxivSource('2607.00001', { refs: ['2601.09999'] });
+    const path = join(dir, 'wiki/sources', `${citer}.md`);
+    writeFileSync(
+      path,
+      readFileSync(path, 'utf8').replace(
+        '## Related sources',
+        '- [Some Blog](https://example.test/post) — not yet in library\n\n## Related sources',
+      ),
+    );
+    const before = read(`wiki/sources/${citer}.md`);
+
+    const events = await drain([scanVault(vault), resolveExternalRefs(vault)], makeCtx());
+    expect(read(`wiki/sources/${citer}.md`)).toBe(before);
+    expect(countsOf(events)).toMatchObject({ pagesResolved: 0, skippedUnparseable: 0 });
+  });
+
+  it('never draws a self-edge through a paper own arXiv DataCite DOI', async () => {
+    // The enrichment step routinely lists a paper's own 10.48550 DOI among its
+    // references, so the citing page and the "landed" page are one paper under
+    // two stable names.
+    const doi = '10.48550/arxiv.2607.00001';
+    const doiUrl = `https://doi.org/${doi}`;
+    const stableId = stableIdForUrl(doiUrl)!;
+    const alias = stableIdToFilename(stableId);
+    writeFileSync(
+      join(dir, 'wiki/sources', `${alias}.md`),
+      formatSourcePage({
+        stableId,
+        url: doiUrl,
+        doi,
+        sourceName: 'arXiv',
+        collected: new Date('2026-07-01T00:00:00Z'),
+        title: 'Same Paper, DOI Copy',
+        field: 'AI/ML',
+        topics: [],
+        cites: [],
+        summary: 'A summary paragraph.',
+      }),
+    );
+    const citer = arxivSource('2607.00001', { doiRefs: [doi] });
+    expect(alias).toBe(`doi-10-48550-${citer}`);
+    const before = read(`wiki/sources/${citer}.md`);
+
+    const events = await drain([scanVault(vault), resolveExternalRefs(vault)], makeCtx());
+
+    expect(read(`wiki/sources/${citer}.md`)).toBe(before);
+    expect(read(`wiki/sources/${alias}.md`)).not.toContain(`- [[wiki/sources/${citer}]]`);
+    expect(countsOf(events)).toMatchObject({ pagesResolved: 0, edgesAdded: 0 });
+  });
+
+  it('feeds the new edge to recount-citations in the same run', async () => {
+    const target = arxivSource('2605.03823');
+    arxivSource('2607.00001', { refs: ['2605.03823'] });
+
+    const ctx = makeCtx();
+    await drain(
+      [scanVault(vault), resolveExternalRefs(vault), recountCitations(vault)],
+      ctx,
+    );
+
+    expect(read(`wiki/sources/${target}.md`)).toContain('cited_by: 1');
+    expect(ctx.stats.citedByUpdated).toBe(1);
+  });
+
+  it('feeds the new edge to export-graph in the same run', async () => {
+    const target = arxivSource('2605.03823');
+    const citer = arxivSource('2607.00001', { refs: ['2605.03823'] });
+
+    await drain(
+      [scanVault(vault), resolveExternalRefs(vault), recountCitations(vault), exportGraph(vault)],
+      makeCtx(),
+    );
+    const graph = JSON.parse(read('graph.json'));
+
+    expect(graph.edges).toContainEqual({
+      from: `wiki/sources/${citer}`,
+      to: `wiki/sources/${target}`,
+      type: 'cites',
+    });
+    expect(graph.nodes).toContainEqual({
+      id: `wiki/sources/${target}`,
+      type: 'source',
+      title: '2605.03823',
+      importance: { citedBy: 1 },
+    });
+  });
+
+  it('re-ranks topic members against the freshly resolved edge', async () => {
+    const target = arxivSource('2605.03823');
+    const other = arxivSource('2604.01111', { collected: '2026-07-20' });
+    arxivSource('2607.00001', { refs: ['2605.03823'] });
+    topic('t', {
+      members: [
+        { name: other, collected: '2026-07-20' },
+        { name: target, collected: '2026-07-01' },
+      ],
+    });
+
+    await drain(
+      [scanVault(vault), resolveExternalRefs(vault), recountCitations(vault), rankTopicMembers(vault)],
+      makeCtx(),
+    );
+
+    const lines = read('wiki/topics/t.md').split('\n').filter((l) => l.startsWith('- [['));
+    expect(lines[0]).toContain(`wiki/sources/${target}`);
+  });
+
+  it('reports every would-write in dry-run and touches nothing', async () => {
+    const target = arxivSource('2605.03823');
+    const citer = arxivSource('2607.00001', { refs: ['2605.03823'] });
+    const before = snapshot();
+
+    const ctx = makeCtx({ dryRun: true });
+    const events = await drain([scanVault(vault), resolveExternalRefs(vault)], ctx);
+
+    expect(snapshot()).toEqual(before);
+    expect(ctx.writes!.written).toEqual([]);
+    // Backlink first, citing page second — the librarian's write order.
+    expect(ctx.writes!.wouldWrite).toEqual([
+      `wiki/sources/${target}.md`,
+      `wiki/sources/${citer}.md`,
+    ]);
+    expect(countsOf(events)).toMatchObject({ pagesResolved: 1, edgesAdded: 1, dryRun: 1 });
+    // The in-memory graph still reflects the resolution, as in every dry run.
+    expect(ctx.inDegree!.get(target)).toBe(1);
   });
 });
 
@@ -577,6 +970,8 @@ describe('computeLintReport', () => {
           citedBy: null,
           hasFrontmatter: true,
           links: ['Samsung', 'wiki/sources/ghost'],
+          externalRefs: [],
+          externalRefsUnparseable: false,
         },
       ],
       topics: [],
@@ -599,6 +994,8 @@ describe('computeLintReport', () => {
       citedBy: null,
       hasFrontmatter: true,
       links,
+      externalRefs: [],
+      externalRefsUnparseable: false,
     });
     const report = computeLintReport({
       sources: [
@@ -710,6 +1107,7 @@ describe('dry run', () => {
     await drain(
       [
         scanVault(vault),
+        resolveExternalRefs(vault),
         regenRegistry(vault),
         recountCitations(vault),
         rankTopicMembers(vault),
@@ -787,6 +1185,8 @@ describe('full pass ordering', () => {
     source('a', { cites: ['b'], body: 'See [[wiki/sources/b]].' });
     source('b', { collected: '2026-06-01' });
     source('c', { collected: '2026-07-15' });
+    const landed = arxivSource('2605.03823', { collected: '2026-07-02' });
+    arxivSource('2607.00001', { collected: '2026-07-03', refs: ['2605.03823', '2601.09999'] });
     topic('t', {
       clusters: ['physics'],
       members: [
@@ -796,8 +1196,11 @@ describe('full pass ordering', () => {
     });
     writeFileSync(join(dir, 'log.md'), '# Log\n');
 
+    // Wiring order as src/lint.ts runs it: resolution first, so the registry,
+    // the recount, the re-rank and the graph all see this run's new edges.
     const phases = () => [
       scanVault(vault),
+      resolveExternalRefs(vault),
       regenRegistry(vault),
       recountCitations(vault),
       rankTopicMembers(vault),
@@ -805,7 +1208,10 @@ describe('full pass ordering', () => {
       exportGraph(vault),
       reportLint(vault),
     ];
-    await drain(phases(), makeCtx());
+    const first = makeCtx();
+    await drain(phases(), first);
+    expect(first.stats.refsResolved).toBe(1);
+    expect(read(`wiki/sources/${landed}.md`)).toContain('cited_by: 1');
     const after = snapshot();
     after.delete('log.md'); // log.md grows by one entry per run, by design
 

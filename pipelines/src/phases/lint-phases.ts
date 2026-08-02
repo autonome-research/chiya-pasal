@@ -10,6 +10,7 @@
  * Phase order matters and is enforced by `requireCtx`:
  *
  *   scan-vault        one read of wiki/sources + wiki/topics into LintCtx
+ *   resolve-external-refs  external refs whose paper has landed become cites
  *   regen-registry    wiki/topics/_registry.md + registry.json
  *   recount-citations cited_by frontmatter ← inbound `cites:` edges
  *   rank-topic-members member lines re-sorted by (cited_by, collected)
@@ -49,7 +50,16 @@ import {
   type GraphSourceInput,
   type GraphTopicInput,
 } from '../shared/graph-export.js';
-import { bumpFrontmatterField } from './page-templates.js';
+import {
+  addToFrontmatterInlineList,
+  appendCitedBy,
+  appendCitedReference,
+  bumpFrontmatterField,
+  parseExternalRefs,
+  removeExternalRefs,
+  stableNameForRefUrl,
+  EXTERNAL_REFS_HEADING,
+} from './page-templates.js';
 import type { GitOps } from '../tools/git.js';
 import type { VaultFs } from '../tools/vault.js';
 
@@ -75,6 +85,21 @@ export interface LintSourceRecord {
   hasFrontmatter: boolean;
   /** Every `[[wiki/...]]` target on the page, for broken-link detection. */
   links: string[];
+  /** `## External references` entries, `[]` when the section is absent or
+   *  unparseable. Kept in sync by `resolve-external-refs` as entries migrate
+   *  into `cites`. */
+  externalRefs: LintExternalRef[];
+  /** The section exists but does not parse as librarian output — every pass
+   *  leaves such a page alone. */
+  externalRefsUnparseable: boolean;
+}
+
+export interface LintExternalRef {
+  label: string;
+  url: string;
+  /** The source page name this ref would have in the library, or null when
+   *  the URL carries no stable identity (neither arXiv nor DOI). */
+  target: string | null;
 }
 
 export interface LintTopicPage {
@@ -195,6 +220,12 @@ export function parseSourcePage(name: string, text: string): LintSourceRecord {
   const h1 = /^#\s+(.+)$/m.exec(fm.body);
   const rawTitle = fm.scalars.get('title');
 
+  // The substring guard keeps the scan off a second full split of the 87 MB
+  // of source pages: only the minority carrying the heading is parsed.
+  const external = text.includes(EXTERNAL_REFS_HEADING)
+    ? parseExternalRefs(text)
+    : ({ status: 'absent' } as const);
+
   return {
     name,
     title: rawTitle ? unquote(rawTitle) : h1 ? h1[1]!.trim() : name,
@@ -207,6 +238,15 @@ export function parseSourcePage(name: string, text: string): LintSourceRecord {
     citedBy: parseIntOrNull(fm.scalars.get('cited_by')),
     hasFrontmatter,
     links,
+    externalRefs:
+      external.status === 'present'
+        ? external.entries.map((e) => ({
+            label: e.label,
+            url: e.url,
+            target: stableNameForRefUrl(e.url),
+          }))
+        : [],
+    externalRefsUnparseable: external.status === 'unparseable',
   };
 }
 
@@ -820,6 +860,188 @@ export const regenRegistry = (vault: VaultFs): Phase<LintCtx> => ({
         changed: (page === 'unchanged' ? 0 : 1) + (json === 'unchanged' ? 0 : 1),
       },
     };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Pass 1b — resolve-external-refs
+// ---------------------------------------------------------------------------
+
+/**
+ * Close the citation graph as demanded papers land.
+ *
+ * A source page written in June lists `arXiv:2605.03823` under `## External
+ * references` because that paper wasn't in the library yet. When the shared
+ * pipeline finally ingests it, nothing goes back and connects the two: the
+ * librarian only ever looks at the article it is currently filing. This pass
+ * is that retroactive link, and it is the reason `citation_demand` is worth
+ * keeping — demand-driven ingestion is pointless if the arriving paper stays
+ * disconnected from the pages that asked for it.
+ *
+ * Ordering is load-bearing. Running before `recount-citations` means the new
+ * edges are counted into `cited_by` in the SAME run; before
+ * `rank-topic-members` means a topic's member list already reflects the
+ * paper's new importance; before `export-graph` means graph.json ships the
+ * edges rather than being a day stale. It runs after `scan-vault` because it
+ * needs the full set of existing page names, and it mutates the scanned
+ * records in place so no pass needs a rescan.
+ *
+ * Conservative by construction:
+ *   - a page whose `## External references` section does not parse as
+ *     librarian output is skipped and counted, never rewritten;
+ *   - so is a page whose `cites:` frontmatter isn't the inline array the
+ *     writers emit;
+ *   - the whole rewrite of a citing page is computed in memory first, so a
+ *     page is never left half-migrated;
+ *   - a ref whose URL carries no stable identity (not arXiv, not DOI) stays
+ *     external — matching it would mean guessing.
+ */
+/** arXiv mints a DataCite DOI for every paper it hosts, so `arxiv-2312-08251`
+ *  and `doi-10-48550-arxiv-2312-08251` are two names for one paper — and the
+ *  enrichment step routinely lists a paper's own DOI among its references. If
+ *  both pages ever exist, resolving that ref would draw a citation edge from a
+ *  paper to itself under its other name. The prefix is derived from the same
+ *  filenames `stableIdToFilename` produces, so nothing here re-normalizes. */
+const ARXIV_DOI_PREFIX = 'doi-10-48550-';
+
+function isSelfReference(pageName: string, target: string): boolean {
+  if (target === pageName) return true;
+  if (target === `${ARXIV_DOI_PREFIX}${pageName}`) return true;
+  return pageName === `${ARXIV_DOI_PREFIX}${target}`;
+}
+
+export const resolveExternalRefs = (vault: VaultFs): Phase<LintCtx> => ({
+  name: 'resolve-external-refs',
+  async *run(ctx) {
+    const sources = requireCtx(ctx, 'sources', 'resolve-external-refs');
+    const inDegree = requireCtx(ctx, 'inDegree', 'resolve-external-refs');
+    const byName = new Map(sources.map((s) => [s.name, s]));
+
+    // Pages this pass has already rewritten. A run can touch the same page
+    // twice (as a citer and as a cite target), and in dry-run nothing reaches
+    // disk at all, so the accumulated text lives here rather than being
+    // re-read.
+    const staged = new Map<string, string>();
+    const currentText = async (path: string): Promise<string | null> => {
+      const cached = staged.get(path);
+      if (cached !== undefined) return cached;
+      return vault.readOptional(path);
+    };
+
+    let pagesResolved = 0;
+    let edgesAdded = 0;
+    let sectionsEmptied = 0;
+    let skippedUnparseable = 0;
+    let processed = 0;
+    const skippedPages: string[] = [];
+    const noteSkip = (name: string): void => {
+      skippedUnparseable++;
+      if (skippedPages.length < MAX_REPORT_ITEMS) skippedPages.push(name);
+    };
+
+    for (const s of sources) {
+      if (s.externalRefsUnparseable) {
+        noteSkip(s.name);
+        continue;
+      }
+      if (s.externalRefs.length === 0) continue;
+      if (++processed % HEARTBEAT_EVERY === 0) await ctx.heartbeat?.();
+
+      // A page cannot cite itself: an article whose own DOI shows up in its
+      // reference list would otherwise gain a self-edge.
+      const resolvable = s.externalRefs.filter(
+        (r) => r.target !== null && !isSelfReference(s.name, r.target) && byName.has(r.target),
+      );
+      if (resolvable.length === 0) continue;
+
+      const path = join(SOURCES_DIR, `${s.name}.md`);
+      const current = await currentText(path);
+      if (current === null) continue;
+
+      // Whole rewrite first, writes second: any refusal below leaves the page
+      // exactly as it was.
+      const removal = removeExternalRefs(current, new Set(resolvable.map((r) => r.url)));
+      if (removal === null || removal.removed === 0) {
+        noteSkip(s.name);
+        continue;
+      }
+      let next = removal.text;
+      let refused = false;
+      for (const ref of resolvable) {
+        next = appendCitedReference(next, ref.target!);
+        const withCite = addToFrontmatterInlineList(next, 'cites', ref.target!);
+        if (withCite === null) {
+          refused = true;
+          break;
+        }
+        next = withCite;
+      }
+      if (refused) {
+        noteSkip(s.name);
+        continue;
+      }
+
+      // Backlinks before the citing page, mirroring the librarian's write
+      // order: the citing page is the marker that the migration completed.
+      for (const ref of resolvable) {
+        const targetPath = join(SOURCES_DIR, `${ref.target!}.md`);
+        const targetCurrent = await currentText(targetPath);
+        if (targetCurrent === null) continue;
+        const targetNext = appendCitedBy(targetCurrent, { filename: s.name, title: s.title });
+        if (targetNext === targetCurrent) continue;
+        await planWrite(ctx, vault, targetPath, targetNext, targetCurrent);
+        staged.set(targetPath, targetNext);
+      }
+
+      await planWrite(ctx, vault, path, next, current);
+      staged.set(path, next);
+
+      // In-memory records: later passes must see the new edges without a
+      // rescan. `cited_by` on the target is deliberately NOT touched here —
+      // recount-citations owns that number and derives it from inDegree.
+      for (const ref of resolvable) {
+        const target = ref.target!;
+        if (!s.cites.includes(target)) {
+          s.cites.push(target);
+          inDegree.set(target, (inDegree.get(target) ?? 0) + 1);
+          edgesAdded++;
+        }
+        const link = `${SOURCES_DIR}/${target}`;
+        if (!s.links.includes(link)) s.links.push(link);
+      }
+      const resolvedUrls = new Set(resolvable.map((r) => r.url));
+      s.externalRefs = s.externalRefs.filter((r) => !resolvedUrls.has(r.url));
+      pagesResolved++;
+      if (removal.emptied) sectionsEmptied++;
+    }
+
+    // `citedByTotal` was derived from the scan's in-degree; the registry pass
+    // renders it, so it has to absorb this run's new edges too.
+    if (edgesAdded > 0 && ctx.topics) {
+      for (const t of ctx.topics) {
+        t.record.citedByTotal = t.members.reduce((sum, m) => sum + (inDegree.get(m) ?? 0), 0);
+      }
+    }
+
+    ctx.stats.refsResolved = edgesAdded;
+    ctx.stats.pagesResolved = pagesResolved;
+    yield {
+      type: 'phase',
+      phase: 'resolve-external-refs',
+      detail: ctx.dryRun
+        ? `dry-run: ${edgesAdded} external ref(s) on ${pagesResolved} page(s) would become cites`
+        : `${edgesAdded} external ref(s) on ${pagesResolved} page(s) resolved into cites`,
+      counts: {
+        pagesResolved,
+        edgesAdded,
+        sectionsEmptied,
+        skippedUnparseable,
+        dryRun: ctx.dryRun ? 1 : 0,
+      },
+    };
+    if (skippedPages.length > 0) {
+      yield { type: 'data', key: 'lint-unparseable-external-refs', value: skippedPages };
+    }
   },
 });
 
