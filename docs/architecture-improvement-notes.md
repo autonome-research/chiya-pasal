@@ -378,6 +378,21 @@ Code should continue to:
 - add source and phase templates
 - add operational `doctor`/inspection commands (started: `npm run doctor` and `npm run status`; richer `jobs`/`sources --health` remain open)
 
+## Phase 5 — richer source understanding (planned)
+
+- **Figure/image extraction and analysis** (added 2026-08-02): the enrich
+  ladder currently discards all non-text content (`htmlToText` strips
+  `<img>`/`<figure>`; `pdftotext` is text-only; a scanned PDF fails
+  enrichment outright). Extraction is cheap — arXiv HTML carries figure
+  URLs + captions in the first-rung fetch, `pdfimages`/`pdffigures2`
+  covers the PDF rung; store under `shared/figures/<stable-id>/`.
+  Analysis requires a vision-capable endpoint (verified 2026-08-02: the
+  qwen36 serve rejects image inputs). Design like the embeddings
+  dependency: a separate `FIGURES_INFERENCE_*` target the pipeline
+  degrades gracefully without; insertion point is a `describeFigures`
+  step in summarize emitting a `### Figures` section (caption + VL
+  description) and asset references on the source page.
+
 ## Open questions for discussion
 
 1. Should collection remain in Python, or should source synthesis move into TypeScript for shared schemas with `ArticleStore`?
