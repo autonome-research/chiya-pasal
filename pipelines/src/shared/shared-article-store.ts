@@ -60,6 +60,7 @@ export interface SharedArticleRow {
   routedAt: Date | null;
   status: SharedStatus;
   statusReason: string | null;
+  summarizeAttempts: number;
 }
 
 export interface SharedArticleInput {
@@ -165,6 +166,44 @@ CREATE INDEX IF NOT EXISTS idx_citation_demand_ref
   ON citation_demand(user_handle, ref_kind, ref_id);
 `;
 
+/**
+ * Columns added after the original schema shipped. Applied idempotently on
+ * every open: SQLite's ALTER TABLE ADD COLUMN is metadata-only (no table
+ * rewrite), and checking PRAGMA table_info first keeps re-opens silent.
+ * Additive-nullable/defaulted only — never widen this mechanism into
+ * destructive migrations.
+ */
+const COLUMN_MIGRATIONS: ReadonlyArray<{ name: string; ddl: string }> = [
+  {
+    name: 'summarize_attempts',
+    ddl: 'ALTER TABLE shared_article ADD COLUMN summarize_attempts INTEGER NOT NULL DEFAULT 0',
+  },
+];
+
+/**
+ * Failure reasons that indicate a transient LLM/network fault rather than a
+ * defect in the article itself: the row is safe to retry. The LLM layer can
+ * return error payloads as text ({"_error":true,"message":...}) instead of
+ * throwing, so these patterns match the embedded message. Plain 4xx (other
+ * than 408/429) and genuine structure violations stay terminal.
+ */
+const TRANSIENT_REASON_PATTERNS: readonly RegExp[] = [
+  /connection (?:error|refused|reset|closed)/i,
+  /\btimed?[ -]?out\b/i,
+  /\btimeout\b/i,
+  /econnreset|econnrefused|etimedout|eai_again|enotfound|epipe|socket hang up/i,
+  /network error|fetch failed/i,
+  /\b(?:408|429)\b/,
+  /\b5\d{2}\b\s*(?:[A-Z][a-z]|error)/, // "502 Bad Gateway", "500 Internal ...", "503 error"
+  /status(?:\s*code)?\s*[:=]?\s*5\d{2}\b/i,
+  /internal server error|bad gateway|service unavailable|gateway timeout|overloaded/i,
+  /rate limit/i,
+];
+
+export function isTransientFailureReason(reason: string): boolean {
+  return TRANSIENT_REASON_PATTERNS.some((re) => re.test(reason));
+}
+
 interface RawRow {
   stable_id: string;
   url: string;
@@ -188,6 +227,7 @@ interface RawRow {
   routed_at: string | null;
   status: SharedStatus;
   status_reason: string | null;
+  summarize_attempts: number;
 }
 
 function sha256(s: string): string {
@@ -239,6 +279,7 @@ function deserializeRow(r: RawRow): SharedArticleRow {
     routedAt: parseDate(r.routed_at),
     status: r.status,
     statusReason: r.status_reason,
+    summarizeAttempts: r.summarize_attempts,
   };
 }
 
@@ -250,39 +291,53 @@ export class SharedArticleStore {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.exec(SCHEMA);
+    this.applyColumnMigrations();
+  }
+
+  private applyColumnMigrations(): void {
+    const existing = new Set(
+      (this.db.prepare(`PRAGMA table_info(shared_article)`).all() as Array<{ name: string }>).map(
+        (c) => c.name,
+      ),
+    );
+    for (const m of COLUMN_MIGRATIONS) {
+      if (!existing.has(m.name)) this.db.exec(m.ddl);
+    }
   }
 
   /**
-   * Insert a freshly-collected article. Dedup by url_hash — re-collecting
-   * the same URL is a no-op. Status starts at 'pending'.
+   * Insert a freshly-collected article. Dedup by stable_id (the primary
+   * identity — an arXiv version bump changes the URL and its hash but not
+   * the stable ID) with url_hash as a secondary match. Status starts at
+   * 'pending'.
    *
-   * If the article already exists, optionally merge in NEW query labels
-   * (so the same article surfacing under a second matcha query annotates
-   * the existing row rather than dropping the signal).
+   * If the article already exists under either identity, merge in NEW query
+   * labels (so the same article surfacing under a second matcha query
+   * annotates the existing row rather than dropping the signal). Neither
+   * constraint may throw out of this path — a constraint no-op is a
+   * 'duplicate', never a crash.
    */
   upsertCollected(input: SharedArticleInput): UpsertResult {
     const urlHash = sha256(input.url.trim());
     const existing = this.db
-      .prepare('SELECT stable_id, query_labels FROM shared_article WHERE url_hash = ?')
-      .get(urlHash) as { stable_id: string; query_labels: string } | undefined;
+      .prepare(
+        'SELECT stable_id, query_labels FROM shared_article WHERE stable_id = ? OR url_hash = ?',
+      )
+      .get(input.stableId, urlHash) as { stable_id: string; query_labels: string } | undefined;
 
     if (existing) {
-      // Merge query labels so we know all queries that surfaced this article.
-      const existingLabels: string[] = JSON.parse(existing.query_labels);
-      const merged = Array.from(new Set([...existingLabels, ...input.queryLabels]));
-      if (merged.length !== existingLabels.length) {
-        this.db
-          .prepare('UPDATE shared_article SET query_labels = ? WHERE stable_id = ?')
-          .run(JSON.stringify(merged), existing.stable_id);
-      }
+      this.mergeQueryLabels(existing, input.queryLabels);
       return 'duplicate';
     }
 
-    this.db
+    // ON CONFLICT DO NOTHING (no target) covers both the stable_id PK and
+    // the url_hash UNIQUE — any race with the pre-check degrades to a no-op.
+    const info = this.db
       .prepare(
         `INSERT INTO shared_article
             (stable_id, url, url_hash, title, source, field, query_labels, abstract)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT DO NOTHING`,
       )
       .run(
         input.stableId,
@@ -294,7 +349,30 @@ export class SharedArticleStore {
         JSON.stringify(input.queryLabels),
         input.abstract,
       );
+    if (info.changes === 0) {
+      const raced = this.db
+        .prepare(
+          'SELECT stable_id, query_labels FROM shared_article WHERE stable_id = ? OR url_hash = ?',
+        )
+        .get(input.stableId, urlHash) as { stable_id: string; query_labels: string } | undefined;
+      if (raced) this.mergeQueryLabels(raced, input.queryLabels);
+      return 'duplicate';
+    }
     return 'inserted';
+  }
+
+  /** Merge query labels so we know all queries that surfaced this article. */
+  private mergeQueryLabels(
+    existing: { stable_id: string; query_labels: string },
+    newLabels: string[],
+  ): void {
+    const existingLabels: string[] = JSON.parse(existing.query_labels);
+    const merged = Array.from(new Set([...existingLabels, ...newLabels]));
+    if (merged.length !== existingLabels.length) {
+      this.db
+        .prepare('UPDATE shared_article SET query_labels = ? WHERE stable_id = ?')
+        .run(JSON.stringify(merged), existing.stable_id);
+    }
   }
 
   listByStatus(status: SharedStatus, limit: number): SharedArticleRow[] {
@@ -414,6 +492,53 @@ export class SharedArticleStore {
         `UPDATE shared_article SET status = 'failed', status_reason = ? WHERE stable_id = ?`,
       )
       .run(reason.slice(0, 500), stableId);
+  }
+
+  /** Record one summarize attempt (transient failures leave status alone but
+   *  still count, so nothing retries forever). Returns the new total. */
+  incrementSummarizeAttempts(stableId: string): number {
+    const row = this.db
+      .prepare(
+        `UPDATE shared_article
+            SET summarize_attempts = summarize_attempts + 1
+          WHERE stable_id = ?
+          RETURNING summarize_attempts`,
+      )
+      .get(stableId) as { summarize_attempts: number } | undefined;
+    return row?.summarize_attempts ?? 0;
+  }
+
+  /**
+   * Reset 'failed' rows whose status_reason matches a transient pattern
+   * (network/provider fault, not an article defect) back to their
+   * pre-summarize status so the next tick retries them. Fulltext presence
+   * tells us which status the row came from: enrich stores fulltext only on
+   * success. Attempts reset to 0 — a requeue is a fresh grant of retries.
+   * Returns the number of rows requeued.
+   */
+  requeueTransientFailures(): number {
+    const failed = this.db
+      .prepare(
+        `SELECT stable_id, fulltext, status_reason FROM shared_article
+          WHERE status = 'failed' AND status_reason IS NOT NULL`,
+      )
+      .all() as Array<{ stable_id: string; fulltext: string | null; status_reason: string }>;
+
+    const requeue = this.db.prepare(
+      `UPDATE shared_article
+          SET status = ?, status_reason = NULL, summarize_attempts = 0
+        WHERE stable_id = ?`,
+    );
+    const tx = this.db.transaction((rows: typeof failed) => {
+      let count = 0;
+      for (const r of rows) {
+        if (!isTransientFailureReason(r.status_reason)) continue;
+        requeue.run(r.fulltext !== null ? 'enriched' : 'enrich-failed', r.stable_id);
+        count++;
+      }
+      return count;
+    });
+    return tx(failed);
   }
 
   // ---- routing telemetry ----------------------------------------------------

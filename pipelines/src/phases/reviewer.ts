@@ -80,10 +80,41 @@ export interface ReviewerOutput {
   cites: ReviewerCite[];
   related: ReviewerRelated[];
   entities: ReviewerEntity[];
-  /** Set when the LLM call truncated, threw, or parse failed. The librarian
-   *  treats a present error as "no recommendations; mark uncategorized". */
+  /** Set when the LLM call truncated, threw, or parse failed. The planner
+   *  defers the article for retry (see REVIEWER_FAILURE_MAX_DEFERRALS);
+   *  once deferrals are exhausted, apply files it uncategorized as a
+   *  logged last resort. */
   error?: string;
   toolRounds?: number;
+}
+
+/**
+ * Reviewer-failure deferral bookkeeping. When the reviewer errors, the planner
+ * defers the article (apply returns it to pending) instead of filing it as
+ * uncategorized and silently dropping its cites/related/entities. The attempt
+ * marker rides in the row's status_reason; after MAX deferrals the next
+ * attempt falls through to degraded uncategorized filing so a persistent
+ * outage cannot wedge the queue.
+ */
+export const REVIEWER_FAILURE_MAX_DEFERRALS = 2;
+
+const REVIEWER_FAILURE_PREFIX = 'reviewer-failed';
+const REVIEWER_FAILURE_ATTEMPT_RE = /^reviewer-failed \(attempt (\d+)\)/;
+
+export function isReviewerFailureReason(reason: string | null | undefined): boolean {
+  return reason != null && reason.startsWith(REVIEWER_FAILURE_PREFIX);
+}
+
+/** Deferral attempts already recorded on the row's status_reason (0 when none). */
+export function reviewerFailureAttempts(statusReason: string | null): number {
+  const m = statusReason ? REVIEWER_FAILURE_ATTEMPT_RE.exec(statusReason) : null;
+  return m ? Number(m[1]) : 0;
+}
+
+/** status_reason / deferral reason carrying the attempt marker. Capped at the
+ *  store's 200-char status_reason convention. */
+export function reviewerFailureReason(attempt: number, error: string): string {
+  return `reviewer-failed (attempt ${attempt}): ${error}`.slice(0, 200);
 }
 
 /** What the librarian does with the reviewer's output AFTER reconcile + gate. */

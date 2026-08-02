@@ -12,7 +12,7 @@ import {
 } from '../src/phases/librarian-planner.js';
 import { ArticleStore, type ArticleRow } from '../src/shared/article-store.js';
 import type { LibrarianCtx } from '../src/shared/librarian-types.js';
-import type { ReviewerOutput } from '../src/phases/reviewer.js';
+import { reviewerFailureReason, type ReviewerOutput } from '../src/phases/reviewer.js';
 import { VaultFs } from '../src/tools/vault.js';
 
 async function drain<T>(gen: AsyncGenerator<T, void>): Promise<T[]> {
@@ -135,6 +135,104 @@ describe('planArticleTree (routed-row consumption)', () => {
       expect(plan.plan.summary).toBe('## Overview\nRouted rich summary.');
       expect(plan.plan.sourcePath).toBe('wiki/sources/arxiv-2606-33333.md');
     }
+  });
+
+  function routedRow(url: string, stableId: string, summary = '## Overview\nSummary.'): ArticleRow {
+    const r = store.upsertRouted({
+      title: 'Routed article',
+      url,
+      source: 'arXiv',
+      field: 'AI/ML',
+      summary,
+      refsArxiv: [],
+      refsDoi: [],
+      sharedStableId: stableId,
+      routedSimilarity: 0.7,
+    });
+    store.markProcessing(r.id!);
+    return store.getById(r.id!)!;
+  }
+
+  it('defers with an attempt marker when the reviewer fails', async () => {
+    const row = routedRow('https://arxiv.org/abs/2606.44444', 'arxiv-2606-44444');
+    const deps = recordingDeps({ bodies: [], refs: [] });
+    deps.reviewer = async () => ({ topics: [], cites: [], related: [], entities: [], error: 'truncated' });
+
+    const ctx = ctxWith([row]);
+    const events = await drain(planArticleTree(clients, vault, store, deps).run(ctx));
+
+    expect(ctx.articlePlans![0]).toEqual({
+      articleId: row.id,
+      outcome: 'deferred',
+      reason: 'reviewer-failed (attempt 1): truncated',
+    });
+    expect(events.at(-1)).toMatchObject({
+      type: 'phase',
+      counts: { deferred: 1, reviewerDeferred: 1 },
+    });
+  });
+
+  it('increments the attempt from the row status_reason on later runs', async () => {
+    const base = routedRow('https://arxiv.org/abs/2606.55555', 'arxiv-2606-55555');
+    const row = { ...base, statusReason: reviewerFailureReason(1, 'truncated') };
+    const deps = recordingDeps({ bodies: [], refs: [] });
+    deps.reviewer = async () => ({ topics: [], cites: [], related: [], entities: [], error: 'boom' });
+
+    const ctx = ctxWith([row]);
+    await drain(planArticleTree(clients, vault, store, deps).run(ctx));
+
+    expect(ctx.articlePlans![0]).toMatchObject({
+      outcome: 'deferred',
+      reason: 'reviewer-failed (attempt 2): boom',
+    });
+  });
+
+  it('third attempt falls through to a degraded plan instead of deferring forever', async () => {
+    const base = routedRow('https://arxiv.org/abs/2606.66666', 'arxiv-2606-66666');
+    const row = { ...base, statusReason: reviewerFailureReason(2, 'truncated') };
+    const deps = recordingDeps({ bodies: [], refs: [] });
+    deps.reviewer = async () => ({ topics: [], cites: [], related: [], entities: [], error: 'truncated' });
+
+    const ctx = ctxWith([row]);
+    await drain(planArticleTree(clients, vault, store, deps).run(ctx));
+
+    const plan = ctx.articlePlans![0]!;
+    expect(plan.outcome).toBe('planned');
+    if (plan.outcome === 'planned') {
+      expect(plan.plan.reviewer.error).toBe('truncated');
+    }
+  });
+
+  it('defers an error-blob summary without invoking any agents', async () => {
+    const res = store.upsertPending({
+      title: 'Legacy blob', url: 'https://arxiv.org/abs/2606.77777', source: null, field: null,
+      snippet: '{"_error": true, "message": "summarize exploded"}', collectedFrom: 't',
+    });
+    store.markProcessing(res.id!);
+    const record = { bodies: [] as string[], refs: [] as Array<{ arxivIds: string[]; dois: string[] }> };
+
+    const ctx = ctxWith([store.getById(res.id!)!]);
+    await drain(planArticleTree(clients, vault, store, recordingDeps(record)).run(ctx));
+
+    expect(ctx.articlePlans![0]).toEqual({
+      articleId: res.id,
+      outcome: 'deferred',
+      reason: 'summary-unavailable',
+    });
+    expect(record.bodies).toEqual([]);
+  });
+
+  it('defers an empty/whitespace body as summary-unavailable', async () => {
+    const res = store.upsertPending({
+      title: 'No body', url: 'https://arxiv.org/abs/2606.88888', source: null, field: null,
+      snippet: '   ', collectedFrom: 't',
+    });
+    store.markProcessing(res.id!);
+
+    const ctx = ctxWith([store.getById(res.id!)!]);
+    await drain(planArticleTree(clients, vault, store, recordingDeps({ bodies: [], refs: [] })).run(ctx));
+
+    expect(ctx.articlePlans![0]).toMatchObject({ outcome: 'deferred', reason: 'summary-unavailable' });
   });
 
   it('skips articles without a stable id', async () => {

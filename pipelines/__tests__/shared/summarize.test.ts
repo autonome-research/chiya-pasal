@@ -71,7 +71,7 @@ describe('summarizeEnriched phase', () => {
     const ctx = makeCtx();
     await drain(summarizeEnriched(store, fakeClients(), summarizer).run(ctx));
 
-    expect(ctx.summarizeCounts).toEqual({ summarized: 2, failed: 0, noText: 0, rejected: 0 });
+    expect(ctx.summarizeCounts).toEqual({ summarized: 2, failed: 0, noText: 0, rejected: 0, retryLater: 0 });
     expect(store.findByStableId('a1')!.status).toBe('summarized');
     expect(store.findByStableId('a1')!.summary).toBe(GOOD_SUMMARY);
     expect(store.findByStableId('a2')!.status).toBe('summarized');
@@ -84,7 +84,7 @@ describe('summarizeEnriched phase', () => {
     await drain(
       summarizeEnriched(store, fakeClients(), async () => GOOD_SUMMARY).run(ctx),
     );
-    expect(ctx.summarizeCounts).toEqual({ summarized: 0, failed: 0, noText: 1, rejected: 0 });
+    expect(ctx.summarizeCounts).toEqual({ summarized: 0, failed: 0, noText: 1, rejected: 0, retryLater: 0 });
     const row = store.findByStableId('empty')!;
     expect(row.status).toBe('failed');
     expect(row.statusReason).toContain('no-text');
@@ -99,7 +99,7 @@ describe('summarizeEnriched phase', () => {
     };
     const ctx = makeCtx();
     await drain(summarizeEnriched(store, fakeClients(), summarizer).run(ctx));
-    expect(ctx.summarizeCounts).toEqual({ summarized: 1, failed: 1, noText: 0, rejected: 0 });
+    expect(ctx.summarizeCounts).toEqual({ summarized: 1, failed: 1, noText: 0, rejected: 0, retryLater: 0 });
     expect(store.findByStableId('boom')!.status).toBe('failed');
     expect(store.findByStableId('boom')!.statusReason).toContain('model exploded');
   });
@@ -109,7 +109,82 @@ describe('summarizeEnriched phase', () => {
     await drain(
       summarizeEnriched(store, fakeClients(), async () => GOOD_SUMMARY).run(ctx),
     );
-    expect(ctx.summarizeCounts).toEqual({ summarized: 0, failed: 0, noText: 0, rejected: 0 });
+    expect(ctx.summarizeCounts).toEqual({ summarized: 0, failed: 0, noText: 0, rejected: 0, retryLater: 0 });
+  });
+});
+
+describe('summarizeEnriched transient-vs-terminal failures', () => {
+  const TRANSIENT_MSG =
+    'summary missing section structure (starts: {"_error":true,"message":"Connection error."})';
+  const TERMINAL_400_MSG =
+    'summary missing section structure (starts: {"_error":true,"message":"400 TextEncodeInput must be Union[)';
+
+  const throwing =
+    (msg: string): SharedSummarizer =>
+    async () => {
+      throw new Error(msg);
+    };
+
+  it('transient error leaves the row retryable and increments attempts', async () => {
+    seed('flaky', { fulltext: 'text' });
+    const ctx = makeCtx();
+    await drain(summarizeEnriched(store, fakeClients(), throwing(TRANSIENT_MSG)).run(ctx));
+
+    expect(ctx.summarizeCounts).toEqual({ summarized: 0, failed: 0, noText: 0, rejected: 0, retryLater: 1 });
+    const row = store.findByStableId('flaky')!;
+    expect(row.status).toBe('enriched'); // unchanged — next tick retries
+    expect(row.statusReason).toBeNull();
+    expect(row.summarizeAttempts).toBe(1);
+  });
+
+  it('transient errors fail for real at the attempt cap (3)', async () => {
+    seed('flaky', { fulltext: 'text' });
+    for (let i = 0; i < 2; i++) {
+      await drain(summarizeEnriched(store, fakeClients(), throwing(TRANSIENT_MSG)).run(makeCtx()));
+      expect(store.findByStableId('flaky')!.status).toBe('enriched');
+    }
+    const ctx = makeCtx();
+    await drain(summarizeEnriched(store, fakeClients(), throwing(TRANSIENT_MSG)).run(ctx));
+
+    expect(ctx.summarizeCounts).toEqual({ summarized: 0, failed: 1, noText: 0, rejected: 0, retryLater: 0 });
+    const row = store.findByStableId('flaky')!;
+    expect(row.status).toBe('failed');
+    expect(row.statusReason).toContain('Connection error');
+    expect(row.summarizeAttempts).toBe(3);
+  });
+
+  it('non-retryable 4xx inside the _error sentinel is terminal on first attempt', async () => {
+    seed('bad-input', { fulltext: 'text' });
+    const ctx = makeCtx();
+    await drain(summarizeEnriched(store, fakeClients(), throwing(TERMINAL_400_MSG)).run(ctx));
+
+    expect(ctx.summarizeCounts).toEqual({ summarized: 0, failed: 1, noText: 0, rejected: 0, retryLater: 0 });
+    const row = store.findByStableId('bad-input')!;
+    expect(row.status).toBe('failed');
+    expect(row.summarizeAttempts).toBe(1);
+  });
+
+  it('genuine structure violations stay terminal', async () => {
+    seed('prose', { fulltext: 'text' });
+    const ctx = makeCtx();
+    await drain(
+      summarizeEnriched(
+        store,
+        fakeClients(),
+        throwing('summary missing section structure (starts: This paper is about)'),
+      ).run(ctx),
+    );
+    expect(store.findByStableId('prose')!.status).toBe('failed');
+  });
+
+  it('successful retry after a transient failure summarizes normally', async () => {
+    seed('flaky', { fulltext: 'text' });
+    await drain(summarizeEnriched(store, fakeClients(), throwing(TRANSIENT_MSG)).run(makeCtx()));
+    const ctx = makeCtx();
+    await drain(summarizeEnriched(store, fakeClients(), async () => GOOD_SUMMARY).run(ctx));
+
+    expect(ctx.summarizeCounts).toEqual({ summarized: 1, failed: 0, noText: 0, rejected: 0, retryLater: 0 });
+    expect(store.findByStableId('flaky')!.status).toBe('summarized');
   });
 });
 
@@ -168,7 +243,7 @@ describe('summarizeEnriched quality gating', () => {
     const ctx = makeCtx();
     await drain(summarizeEnriched(store, fakeClients(), summarizer).run(ctx));
 
-    expect(ctx.summarizeCounts).toEqual({ summarized: 1, failed: 0, noText: 0, rejected: 1 });
+    expect(ctx.summarizeCounts).toEqual({ summarized: 1, failed: 0, noText: 0, rejected: 1, retryLater: 0 });
     const junk = store.findByStableId('junk')!;
     expect(junk.status).toBe('rejected-quality');
     expect(junk.statusReason).toContain('announcement');

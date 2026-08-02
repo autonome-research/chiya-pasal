@@ -20,6 +20,7 @@
     "migrate-queue": "tsx scripts/migrate-queue.ts",
     "backfill-source-urls": "tsx scripts/backfill-source-urls.ts",
     "backfill-archive-articles": "tsx scripts/backfill-archive-articles.ts",
+    "repair-error-summaries": "tsx scripts/repair-error-summaries.ts",
     "migrate-topics": "tsx scripts/migrate-topics.ts",
     "api-ingest": "tsx src/collection/api-ingest.ts"
   },

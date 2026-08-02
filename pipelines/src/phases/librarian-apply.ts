@@ -25,7 +25,11 @@ import {
   formatTopicPage,
   type ExternalRef,
 } from './page-templates.js';
-import { applyReconcileAndGate } from './reviewer.js';
+import {
+  applyReconcileAndGate,
+  isReviewerFailureReason,
+  reviewerFailureAttempts,
+} from './reviewer.js';
 
 /** Sink for unresolved-citation demand (tier 2 of citation completion).
  *  Wired to the shared cache's ledger by the entry point; absent in tests
@@ -129,6 +133,15 @@ function gateNoteFromStats(gateStats: {
     0
     ? ` [gate: fold=${gateStats.foldedSlugs} drop=${gateStats.droppedHallucinations} dup=${gateStats.rejectedNearDuplicates} thin=${gateStats.rejectedThinDefinition}]`
     : '';
+}
+
+/** A planned article carrying a reviewer error only reaches apply after its
+ *  deferrals are exhausted (REVIEWER_FAILURE_MAX_DEFERRALS) — it files as
+ *  uncategorized as a last resort, and the journal must say so. */
+function degradedReviewerNote(plan: PlannedArticle): string {
+  if (!plan.reviewer.error) return '';
+  const attempt = reviewerFailureAttempts(plan.article.statusReason) + 1;
+  return ` [reviewer-failed x${attempt}: degraded uncategorized filing — ${plan.reviewer.error.slice(0, 80)}]`;
 }
 
 async function applyPlannedArticle(
@@ -281,7 +294,7 @@ async function applyPlannedArticle(
       sourcePagePath: plan.sourcePath,
       topicPagePaths,
       backlinkPagePaths,
-      logEntry: `[${ts}] ingest-v3 | ${plan.article.title.slice(0, 80)} → ${slugSummary}${gateNote}`,
+      logEntry: `[${ts}] ingest-v3 | ${plan.article.title.slice(0, 80)} → ${slugSummary}${gateNote}${degradedReviewerNote(plan)}`,
     };
   } catch (err) {
     await writer.rollback();
@@ -362,7 +375,7 @@ async function previewPlannedArticle(
       sourcePagePath: plan.sourcePath,
       topicPagePaths,
       backlinkPagePaths,
-      logEntry: `[${ts}] ingest-v3 | ${plan.article.title.slice(0, 80)} → ${slugSummary}${gateNoteFromStats(gated.gateStats)}`,
+      logEntry: `[${ts}] ingest-v3 | ${plan.article.title.slice(0, 80)} → ${slugSummary}${gateNoteFromStats(gated.gateStats)}${degradedReviewerNote(plan)}`,
     };
   } catch (err) {
     return {
@@ -484,6 +497,13 @@ export const applyArticlePlans = (
       }
 
       if (result.outcome === 'deferred') {
+        // Reviewer-failure deferrals persist their attempt marker so the next
+        // run's planner can cap retries. The store has no reasoned-pending
+        // transition: markSkipped writes status_reason, and markPending then
+        // restores 'pending' without clearing it.
+        if (isReviewerFailureReason(result.reason)) {
+          store.markSkipped(result.articleId, result.reason.slice(0, 200));
+        }
         store.markPending(result.articleId);
         results.push({
           articleId: result.articleId,
@@ -540,10 +560,15 @@ export const applyArticlePlans = (
       (acc, r) => { acc[r.outcome] = (acc[r.outcome] ?? 0) + 1; return acc; },
       { done: 0, skipped: 0, failed: 0 } as Record<string, number>,
     );
+    // Reviewer outages surface in the journal instead of laundering into
+    // uncategorized filings.
+    tally.reviewerDeferred = plans.filter(
+      (p) => p.outcome === 'deferred' && isReviewerFailureReason(p.reason),
+    ).length;
     yield {
       type: 'phase',
       phase: 'apply-article-plans',
-      detail: `done=${tally.done} skipped=${tally.skipped} failed=${tally.failed}`,
+      detail: `done=${tally.done} skipped=${tally.skipped} failed=${tally.failed} reviewer-deferred=${tally.reviewerDeferred}`,
       counts: tally,
     };
   },

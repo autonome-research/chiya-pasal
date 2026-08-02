@@ -184,6 +184,25 @@ describe('formatSourcePage', () => {
     expect(after).toMatch(/_None yet\._/);
   });
 
+  it('sole uncategorized topic renders as plain text, never a wikilink', () => {
+    const out = formatSourcePage(baseSourceInput({ topics: ['uncategorized'] }));
+    const after = out.split('## Topics')[1]!;
+    expect(after).toContain('- uncategorized (no topic assigned yet)');
+    expect(out).not.toContain('[[wiki/topics/uncategorized]]');
+    // Frontmatter stays queryable.
+    expect(parseFrontmatter(out).topics).toBe('[uncategorized]');
+  });
+
+  it('uncategorized alongside real topics: real slugs linked, sentinel unlinked', () => {
+    const out = formatSourcePage(
+      baseSourceInput({ topics: ['bayes-consistency', 'uncategorized'] }),
+    );
+    expect(out).toContain('- [[wiki/topics/bayes-consistency]]');
+    expect(out).toContain('- uncategorized');
+    expect(out).not.toContain('[[wiki/topics/uncategorized]]');
+    expect(out).not.toContain('(no topic assigned yet)');
+  });
+
   it('empty cites → "_None resolved against the current library._"', () => {
     const out = formatSourcePage(baseSourceInput({ cites: [] }));
     const after = out.split('## Cited references in this library')[1]!;

@@ -6,6 +6,9 @@ import type OpenAI from 'openai';
 
 import {
   applyReconcileAndGate,
+  isReviewerFailureReason,
+  reviewerFailureAttempts,
+  reviewerFailureReason,
   runReviewerWith,
   type ReviewerAgentFn,
   type ReviewerClients,
@@ -184,6 +187,29 @@ describe('runReviewerWith — failure modes', () => {
     } finally {
       cleanup();
     }
+  });
+});
+
+describe('reviewer failure deferral bookkeeping', () => {
+  it('round-trips the attempt marker through status_reason', () => {
+    const reason = reviewerFailureReason(1, 'truncated');
+    expect(reason).toBe('reviewer-failed (attempt 1): truncated');
+    expect(isReviewerFailureReason(reason)).toBe(true);
+    expect(reviewerFailureAttempts(reason)).toBe(1);
+    expect(reviewerFailureAttempts(reviewerFailureReason(2, 'boom'))).toBe(2);
+  });
+
+  it('non-failure reasons parse as zero attempts', () => {
+    expect(reviewerFailureAttempts(null)).toBe(0);
+    expect(reviewerFailureAttempts('deadline-rolled-over')).toBe(0);
+    expect(isReviewerFailureReason('deadline-rolled-over')).toBe(false);
+    expect(isReviewerFailureReason(null)).toBe(false);
+  });
+
+  it('caps the persisted reason at 200 chars', () => {
+    const reason = reviewerFailureReason(1, 'x'.repeat(500));
+    expect(reason.length).toBe(200);
+    expect(reviewerFailureAttempts(reason)).toBe(1);
   });
 });
 

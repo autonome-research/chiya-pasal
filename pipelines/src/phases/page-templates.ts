@@ -9,6 +9,11 @@
 
 import { createHash } from 'crypto';
 
+/** Sentinel topic slug for unfiled articles. The apply phase deliberately
+ *  never creates wiki/topics/uncategorized.md, so the sentinel must never be
+ *  rendered as a wikilink (it stays in frontmatter for queryability). */
+export const UNCATEGORIZED_TOPIC = 'uncategorized';
+
 export type StableId =
   | { kind: 'arxiv'; id: string }
   | { kind: 'doi'; doi: string }
@@ -182,7 +187,18 @@ export function formatSourcePage(input: SourcePageInput): string {
   if (input.topics.length === 0) {
     body.push('_None yet._');
   } else {
-    for (const t of input.topics) body.push(`- [[wiki/topics/${t}]]`);
+    for (const t of input.topics) {
+      if (t === UNCATEGORIZED_TOPIC) {
+        // No uncategorized topic page exists to link to.
+        body.push(
+          input.topics.length === 1
+            ? '- uncategorized (no topic assigned yet)'
+            : '- uncategorized',
+        );
+      } else {
+        body.push(`- [[wiki/topics/${t}]]`);
+      }
+    }
   }
   body.push('', '## Cited references in this library', '');
   if (input.cites.length === 0) {

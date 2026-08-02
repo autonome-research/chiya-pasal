@@ -27,7 +27,7 @@ const CLASSIFIER_BUCKETS = `Buckets:
 - "notable":   genuinely new, broadly interesting topic not yet covered in the wiki.
 - "skip":      noise, paywalled boilerplate, irrelevant, or off-domain.`;
 
-function buildClassifierSystemPrompt(vault: VaultContext): string {
+export function buildClassifierSystemPrompt(vault: VaultContext): string {
   const focuses = vault.focuses.length
     ? vault.focuses.map((f) => `${f.path}:\n${f.content.trim().slice(0, 600)}`).join('\n---\n')
     : '(none)';
@@ -35,7 +35,14 @@ function buildClassifierSystemPrompt(vault: VaultContext): string {
     ? vault.research.map((r) => `${r.path}:\n${r.content.trim().slice(0, 600)}`).join('\n---\n')
     : '(none)';
   const taste = vault.tasteMd.trim().slice(0, 1500) || '(empty)';
-  const indexExcerpt = vault.indexMd.trim().slice(0, 2000);
+  // Registry interests are additive: absent → this section vanishes and the
+  // prompt matches the vault-signals-only shape.
+  const interestsSection = vault.interestParagraphs.length
+    ? `\n\n## User interests (from tenant registry)\n${vault.interestParagraphs
+        .map((p) => p.slice(0, 600))
+        .join('\n\n')}`
+    : '';
+  const topics = vault.topicSlugs.length ? vault.topicSlugs.join(', ') : '(none)';
 
   return `You are a research-digest classifier. Given a single article and the user context below, decide which digest section the article belongs in.
 
@@ -57,10 +64,10 @@ ${focuses}
 ${research}
 
 ## TASTE preferences
-${taste}
+${taste}${interestsSection}
 
-## Wiki index (first 2k chars — to detect followups)
-${indexExcerpt}`;
+## Existing wiki topics (for the followup bucket + wikilinks)
+${topics}`;
 }
 
 function buildClassifierUserMessage(article: Article): string {

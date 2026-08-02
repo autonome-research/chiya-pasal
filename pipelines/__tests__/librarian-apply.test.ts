@@ -199,6 +199,65 @@ describe('applyArticlePlans', () => {
   });
 });
 
+describe('applyArticlePlans reviewer-failure deferral', () => {
+  it('returns a reviewer-failed deferral to pending with the attempt marker persisted', async () => {
+    const a = insertArticle('Outage paper', 'https://arxiv.org/abs/2605.00010');
+    const reason = 'reviewer-failed (attempt 1): truncated';
+
+    const ctx = ctxWith([{ articleId: a.id, outcome: 'deferred', reason }]);
+    const events = await drain(applyArticlePlans(vault, store).run(ctx));
+
+    expect(ctx.results?.[0]).toMatchObject({ outcome: 'skipped', reason });
+    const row = store.getById(a.id)!;
+    expect(row.status).toBe('pending');
+    expect(row.statusReason).toBe(reason);
+    // The outage is visible in the phase event, not laundered.
+    expect(events.at(-1)).toMatchObject({
+      type: 'phase',
+      phase: 'apply-article-plans',
+      counts: { reviewerDeferred: 1 },
+    });
+    expect((events.at(-1) as { detail: string }).detail).toContain('reviewer-deferred=1');
+  });
+
+  it('non-reviewer deferrals still return to pending without touching status_reason', async () => {
+    const a = insertArticle('Rolled paper', 'https://arxiv.org/abs/2605.00011');
+
+    const ctx = ctxWith([{ articleId: a.id, outcome: 'deferred', reason: 'deadline-rolled-over' }]);
+    const events = await drain(applyArticlePlans(vault, store).run(ctx));
+
+    const row = store.getById(a.id)!;
+    expect(row.status).toBe('pending');
+    expect(row.statusReason).toBeNull();
+    expect(events.at(-1)).toMatchObject({ counts: { reviewerDeferred: 0 } });
+  });
+
+  it('exhausted deferrals file uncategorized as a logged last resort, without a dangling wikilink', async () => {
+    const a = insertArticle('Stuck paper', 'https://arxiv.org/abs/2605.00012');
+    // Simulate two prior deferrals recorded on the row.
+    store.markSkipped(a.id, 'reviewer-failed (attempt 2): truncated');
+    store.markPending(a.id);
+    store.markProcessing(a.id);
+    const row = store.getById(a.id)!;
+
+    const plan = planned(row);
+    plan.reviewer = { topics: [], cites: [], related: [], entities: [], error: 'truncated' };
+    const ctx = ctxWith([{ articleId: a.id, outcome: 'planned', plan }]);
+    await drain(applyArticlePlans(vault, store).run(ctx));
+
+    const result = ctx.results?.[0];
+    expect(result).toMatchObject({ outcome: 'done' });
+    expect(result?.logEntry).toContain('reviewer-failed x3: degraded uncategorized filing — truncated');
+    expect(store.getById(a.id)?.status).toBe('done');
+
+    const page = await vault.read(plan.sourcePath);
+    expect(page).toContain('topics: [uncategorized]');
+    expect(page).toContain('- uncategorized (no topic assigned yet)');
+    expect(page).not.toContain('[[wiki/topics/uncategorized]]');
+    expect(await vault.exists('wiki/topics/uncategorized.md')).toBe(false);
+  });
+});
+
 describe('applyArticlePlans external references + citation demand (tiers 1-2)', () => {
   function routedArticle(refsArxiv: string[]): ArticleRow {
     const res = store.upsertRouted({

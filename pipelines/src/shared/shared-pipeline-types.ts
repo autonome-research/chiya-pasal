@@ -13,13 +13,13 @@ export interface SharedPipelineCtx extends BasePipelineContext {
   inboxFiles?: string[];
 
   // Set by absorb-inbox.
-  absorbCounts?: { files: number; parsed: number; inserted: number; duplicates: number; skippedNoUrl: number };
+  absorbCounts?: { files: number; parsed: number; inserted: number; duplicates: number; skippedNoUrl: number; skippedError: number };
 
   // Set by shared-enrich.
   enrichCounts?: { enriched: number; enrichFailed: number; retryLater: number };
 
   // Set by shared-summarize.
-  summarizeCounts?: { summarized: number; failed: number; noText: number; rejected: number };
+  summarizeCounts?: { summarized: number; failed: number; noText: number; rejected: number; retryLater: number };
 
   // Set by shared-embed.
   embeddedCount?: number;

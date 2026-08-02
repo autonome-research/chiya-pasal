@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-import { SharedArticleStore } from '../src/shared/shared-article-store.js';
+import { isTransientFailureReason, SharedArticleStore } from '../src/shared/shared-article-store.js';
 
 let dir: string;
 let store: SharedArticleStore;
@@ -55,6 +55,120 @@ describe('SharedArticleStore.upsertCollected', () => {
     store.upsertCollected(baseInput);
     const row = store.findByStableId(baseInput.stableId);
     expect(row!.queryLabels).toEqual(['ai-ml']);
+  });
+
+  it('same stable_id with a different url (arXiv version bump) is a duplicate, not a crash', () => {
+    store.upsertCollected(baseInput);
+    // v2 URL: different url_hash, same stable_id — the live crash-loop case.
+    const result = store.upsertCollected({
+      ...baseInput,
+      url: 'https://arxiv.org/abs/2403.12834v2',
+      queryLabels: ['robotics'],
+    });
+    expect(result).toBe('duplicate');
+    const row = store.findByStableId(baseInput.stableId)!;
+    expect(row.url).toBe(baseInput.url); // original row untouched
+    expect(row.queryLabels.sort()).toEqual(['ai-ml', 'robotics']);
+    expect(store.listByStatus('pending', 10)).toHaveLength(1);
+  });
+
+  it('new row starts with zero summarize attempts', () => {
+    store.upsertCollected(baseInput);
+    expect(store.findByStableId(baseInput.stableId)!.summarizeAttempts).toBe(0);
+  });
+
+  it('column migration is idempotent across re-opens', () => {
+    store.upsertCollected(baseInput);
+    store.incrementSummarizeAttempts(baseInput.stableId);
+    const path = join(dir, 'articles.db');
+    const reopened = new SharedArticleStore(path);
+    try {
+      expect(reopened.findByStableId(baseInput.stableId)!.summarizeAttempts).toBe(1);
+    } finally {
+      reopened.close();
+    }
+  });
+});
+
+describe('SharedArticleStore.incrementSummarizeAttempts', () => {
+  it('increments and returns the running total', () => {
+    store.upsertCollected(baseInput);
+    expect(store.incrementSummarizeAttempts(baseInput.stableId)).toBe(1);
+    expect(store.incrementSummarizeAttempts(baseInput.stableId)).toBe(2);
+    expect(store.findByStableId(baseInput.stableId)!.summarizeAttempts).toBe(2);
+  });
+
+  it('returns 0 for an unknown stable_id', () => {
+    expect(store.incrementSummarizeAttempts('nope')).toBe(0);
+  });
+});
+
+describe('isTransientFailureReason', () => {
+  it.each([
+    'summarize: summary missing section structure (starts: {"_error":true,"message":"Connection error."})',
+    'ETIMEDOUT while contacting host',
+    'request timed out after 60s',
+    '502 Bad Gateway',
+    'Request failed with status code 503',
+    'HTTP 429 rate limit exceeded',
+    '408 Request Timeout',
+    'socket hang up',
+    'the provider is overloaded',
+  ])('transient: %s', (reason) => {
+    expect(isTransientFailureReason(reason)).toBe(true);
+  });
+
+  it.each([
+    'summarize: summary missing section structure (starts: {"_error":true,"message":"400 TextEncodeInput must be Union[)',
+    'summary missing section structure (starts: This paper is about)',
+    'no-text: neither fulltext nor abstract',
+    'summary truncated: model exhausted its output budget',
+  ])('terminal: %s', (reason) => {
+    expect(isTransientFailureReason(reason)).toBe(false);
+  });
+});
+
+describe('SharedArticleStore.requeueTransientFailures', () => {
+  const TRANSIENT =
+    'summarize: summary missing section structure (starts: {"_error":true,"message":"Connection error."})';
+
+  function seedFailed(stableId: string, opts: { fulltext: boolean; reason: string }): void {
+    store.upsertCollected({ ...baseInput, stableId, url: `https://example.com/${stableId}` });
+    if (opts.fulltext) store.markEnriched(stableId, 'body', [], []);
+    else store.markEnrichFailed(stableId, 'fetch failed');
+    store.incrementSummarizeAttempts(stableId);
+    store.markFailed(stableId, opts.reason);
+  }
+
+  it('restores transient failures to their pre-summarize status and resets attempts', () => {
+    seedFailed('had-text', { fulltext: true, reason: TRANSIENT });
+    seedFailed('no-fulltext', { fulltext: false, reason: TRANSIENT });
+    seedFailed('terminal-400', {
+      fulltext: true,
+      reason: 'summarize: summary missing section structure (starts: {"_error":true,"message":"400 TextEncodeInput must be Union[)',
+    });
+    seedFailed('terminal-notext', { fulltext: false, reason: 'no-text: neither fulltext nor abstract' });
+
+    const count = store.requeueTransientFailures();
+    expect(count).toBe(2);
+
+    const hadText = store.findByStableId('had-text')!;
+    expect(hadText.status).toBe('enriched'); // fulltext present → came from enriched
+    expect(hadText.statusReason).toBeNull();
+    expect(hadText.summarizeAttempts).toBe(0);
+
+    const noFull = store.findByStableId('no-fulltext')!;
+    expect(noFull.status).toBe('enrich-failed'); // abstract-fallback path preserved
+    expect(noFull.summarizeAttempts).toBe(0);
+
+    expect(store.findByStableId('terminal-400')!.status).toBe('failed');
+    expect(store.findByStableId('terminal-notext')!.status).toBe('failed');
+  });
+
+  it('is a no-op when nothing failed transiently', () => {
+    store.upsertCollected(baseInput);
+    expect(store.requeueTransientFailures()).toBe(0);
+    expect(store.findByStableId(baseInput.stableId)!.status).toBe('pending');
   });
 });
 

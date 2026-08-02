@@ -86,7 +86,7 @@ describe('renderDigestEmailHtml', () => {
       direction: 'AM',
       articles: [],
       classified: [],
-      vault: { logTail: '', claudeMd: '', tasteMd: '', indexMd: '', focuses: [], research: [], profile: null, interests: null },
+      vault: { logTail: '', claudeMd: '', tasteMd: '', focuses: [], research: [], profile: null, interests: null, interestParagraphs: [], topicSlugs: [] },
     });
 
     expect(html).toContain('Nothing this cycle.');

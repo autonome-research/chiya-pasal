@@ -55,6 +55,13 @@ export interface ArticleInput {
 
 export type UpsertResult = 'inserted' | 'duplicate-url' | 'duplicate-title';
 
+/** Selector for the terminal-status requeue path (admin CLI + repair script). */
+export interface RequeueFilter {
+  status: Extract<ArticleStatus, 'failed' | 'skipped'>;
+  /** Raw SQL LIKE pattern matched against status_reason; omit for all reasons. */
+  likeReason?: string;
+}
+
 /**
  * Input for rows the multi-tenant routing layer copies into a user's store.
  * The rich summary rides in `summary` (stored in the snippet column — it IS
@@ -362,6 +369,17 @@ export class ArticleStore {
   }
 
   /**
+   * Lookup by URL through the same normalization the upsert paths hash with,
+   * so any string form that would have deduped against a row finds that row.
+   * url_hash is unique-when-present → at most one match.
+   */
+  findByUrl(url: string, source: string | null = null): ArticleRow | null {
+    const normalized = normalizeUrl(normalizeSourceUrl(url, source));
+    if (!normalized) return null;
+    return this.findByUrlHash(sha256(normalized));
+  }
+
+  /**
    * Direct lookup by the existing url_hash column (sha256 of normalized URL).
    */
   findByUrlHash(urlHash: string): ArticleRow | null {
@@ -490,6 +508,73 @@ export class ArticleStore {
          WHERE id=?`,
       )
       .run(reason, id);
+  }
+
+  /**
+   * Full reset to 'pending' for the repair path: clears status_reason,
+   * processed_at, AND page_paths, so the librarian regenerates the source
+   * page from scratch (a lingering page_paths entry would leave the row
+   * claiming a page the repair just deleted).
+   */
+  resetToPending(id: number): void {
+    this.db
+      .prepare(
+        `UPDATE article SET status='pending', status_reason=NULL, processed_at=NULL,
+                            page_paths='[]'
+         WHERE id=?`,
+      )
+      .run(id);
+  }
+
+  /**
+   * Hard-delete a row. Repair-only: removing the row frees its url_hash /
+   * title_hash so a fresh inbox drop of the same article re-ingests instead
+   * of dedup-skipping.
+   */
+  deleteById(id: number): void {
+    this.db.prepare(`DELETE FROM article WHERE id=?`).run(id);
+  }
+
+  /**
+   * Requeue terminal rows ('failed' | 'skipped') back to 'pending'.
+   * Clears status_reason and processed_at; page_paths untouched — the
+   * librarian's exists-check dedups against any pages a prior attempt wrote.
+   * Returns the number of rows requeued.
+   */
+  requeueByStatus(filter: RequeueFilter): number {
+    const where = filter.likeReason !== undefined
+      ? `status=? AND status_reason LIKE ?`
+      : `status=?`;
+    const params = filter.likeReason !== undefined
+      ? [filter.status, filter.likeReason]
+      : [filter.status];
+    const result = this.db
+      .prepare(
+        `UPDATE article SET status='pending', status_reason=NULL, processed_at=NULL
+         WHERE ${where}`,
+      )
+      .run(...params);
+    return result.changes;
+  }
+
+  /**
+   * status_reason histogram for the rows requeueByStatus(filter) would touch.
+   * Drives the admin dry-run report. Most-frequent first.
+   */
+  reasonHistogram(filter: RequeueFilter): Array<{ reason: string | null; count: number }> {
+    const where = filter.likeReason !== undefined
+      ? `status=? AND status_reason LIKE ?`
+      : `status=?`;
+    const params = filter.likeReason !== undefined
+      ? [filter.status, filter.likeReason]
+      : [filter.status];
+    return this.db
+      .prepare(
+        `SELECT status_reason AS reason, COUNT(*) AS count FROM article
+         WHERE ${where}
+         GROUP BY status_reason ORDER BY count DESC, reason ASC`,
+      )
+      .all(...params) as Array<{ reason: string | null; count: number }>;
   }
 
   /**

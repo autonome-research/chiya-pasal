@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -103,5 +103,51 @@ describe('scanSharedInbox + absorbInbox', () => {
     await drain(scanSharedInbox(inboxFs).run(ctx));
     await drain(absorbInbox(inboxFs, store).run(ctx));
     expect(ctx.absorbCounts).toMatchObject({ files: 0, parsed: 0 });
+  });
+
+  it('an arXiv version bump (same stable_id, new url) absorbs as duplicate and merges labels', async () => {
+    // v1 already in the store (different url → different url_hash, SAME stable_id).
+    store.upsertCollected({
+      stableId: 'arxiv-2606-11111',
+      url: 'http://arxiv.org/abs/2606.11111v1',
+      title: 'Attention is all you need again',
+      source: 'arXiv',
+      field: 'NLP',
+      queryLabels: ['NLP'],
+      abstract: null,
+    });
+
+    const ctx = makeCtx();
+    await drain(scanSharedInbox(inboxFs).run(ctx));
+    await drain(absorbInbox(inboxFs, store).run(ctx));
+
+    // Must not throw SQLITE_CONSTRAINT_PRIMARYKEY; the v1 row absorbs the hit.
+    expect(ctx.absorbCounts).toMatchObject({ inserted: 1, duplicates: 1, skippedError: 0 });
+    const row = store.findByStableId('arxiv-2606-11111')!;
+    expect(row.url).toBe('http://arxiv.org/abs/2606.11111v1');
+    expect(row.queryLabels.sort()).toEqual(['AI/ML', 'NLP']);
+    expect(existsSync(join(dir, 'archive', '2026-06-28-articles.md'))).toBe(true);
+  });
+
+  it('one poisoned article is skipped with an error count; the rest absorb and the file archives', async () => {
+    const original = store.upsertCollected.bind(store);
+    vi.spyOn(store, 'upsertCollected').mockImplementation((input) => {
+      if (input.url.includes('2606.22222')) throw new Error('SQLITE_CONSTRAINT: boom');
+      return original(input);
+    });
+
+    const ctx = makeCtx();
+    await drain(scanSharedInbox(inboxFs).run(ctx));
+    const events = await drain(absorbInbox(inboxFs, store).run(ctx));
+
+    expect(ctx.absorbCounts).toMatchObject({ inserted: 1, duplicates: 0, skippedError: 1 });
+    expect(store.findByStableId('arxiv-2606-11111')).not.toBeNull();
+    expect(store.findByStableId('arxiv-2606-22222')).toBeNull();
+    // File is archived after all rows were handled, even with a bad row.
+    expect(existsSync(join(dir, '2026-06-28-articles.md'))).toBe(false);
+    expect(existsSync(join(dir, 'archive', '2026-06-28-articles.md'))).toBe(true);
+    // The phase event surfaces the error.
+    const phase = events.find((e) => e.type === 'phase' && e.phase === 'absorb-inbox');
+    expect(phase && 'detail' in phase ? phase.detail : '').toContain('SQLITE_CONSTRAINT: boom');
   });
 });

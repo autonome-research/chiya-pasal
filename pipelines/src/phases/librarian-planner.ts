@@ -29,7 +29,14 @@ import { runTopicScout, type TopicScoutRunner } from './scouts/topic-scout.js';
 import { runSourceScout, type SourceScoutRunner } from './scouts/source-scout.js';
 import { runEntityScout, type EntityScoutRunner } from './scouts/entity-scout.js';
 import { runCiteTracker, type CiteTrackerRunner } from './scouts/cite-tracker.js';
-import { runReviewer, type ReviewerRunner } from './reviewer.js';
+import {
+  isReviewerFailureReason,
+  REVIEWER_FAILURE_MAX_DEFERRALS,
+  reviewerFailureAttempts,
+  reviewerFailureReason,
+  runReviewer,
+  type ReviewerRunner,
+} from './reviewer.js';
 
 export interface PerArticleClients {
   /** Tool-capable model used by router + 4 scouts + reviewer. The librarian
@@ -61,6 +68,11 @@ export function refsForArticle(article: ArticleRow, body: string): ExtractedRefs
 }
 
 const PER_ARTICLE_CONCURRENCY = 4;
+
+/** Legacy summarize failures cemented '{"_error":true,...}' blobs into the
+ *  snippet column. The shared summarize gate blocks new ones; this planner
+ *  guard is defense in depth so such a payload is never planned from. */
+const ERROR_BLOB_RE = /^\s*\{"_error"\s*:\s*true/;
 
 export const planArticleTree =
   (
@@ -108,6 +120,19 @@ export const planArticleTree =
             };
           }
 
+          // The rich summary from the shared pipeline (or, for legacy rows,
+          // the raw collected snippet — degraded but workable scout context).
+          // An empty body or an error blob is not prose to plan from: defer
+          // until a usable summary exists rather than cementing garbage.
+          const body = article.snippet ?? '';
+          if (body.trim().length === 0 || ERROR_BLOB_RE.test(body)) {
+            return {
+              articleId: article.id,
+              outcome: 'deferred',
+              reason: 'summary-unavailable',
+            };
+          }
+
           // Per-article child AbortController. Each runner has multiple LLM
           // subcalls; using a child signal prevents listener buildup on the
           // parent while preserving cancellation from the deadline/systemd path.
@@ -128,9 +153,6 @@ export const planArticleTree =
             }
           };
 
-          // The rich summary from the shared pipeline (or, for legacy rows,
-          // the raw collected snippet — degraded but workable scout context).
-          const body = article.snippet ?? '';
           const articleRefs = refsForArticle(article, body);
 
           try {
@@ -183,6 +205,21 @@ export const planArticleTree =
               signal,
             );
 
+            // A reviewer failure carries no recommendations — filing now
+            // would silently drop the article's topics/cites/related/entities.
+            // Defer for retry until the attempt cap; the capped article falls
+            // through to degraded uncategorized filing (apply logs it).
+            if (reviewerOut.error) {
+              const attempt = reviewerFailureAttempts(article.statusReason) + 1;
+              if (attempt <= REVIEWER_FAILURE_MAX_DEFERRALS) {
+                return {
+                  articleId: article.id,
+                  outcome: 'deferred',
+                  reason: reviewerFailureReason(attempt, reviewerOut.error),
+                };
+              }
+            }
+
             // The summary in the plan is the article's pre-computed rich
             // summary. Final topics/cites are deliberately NOT in the plan:
             // the apply phase re-gates reviewer output against fresh vault
@@ -226,10 +263,14 @@ export const planArticleTree =
         (acc, r) => { acc[r.outcome] = (acc[r.outcome] ?? 0) + 1; return acc; },
         { planned: 0, skipped: 0, deferred: 0, failed: 0 } as Record<string, number>,
       );
+      // Reviewer outages must be visible in the journal, not laundered.
+      tally.reviewerDeferred = ctx.articlePlans.filter(
+        (r) => r.outcome === 'deferred' && isReviewerFailureReason(r.reason),
+      ).length;
       yield {
         type: 'phase',
         phase: 'plan-article-tree',
-        detail: `planned=${tally.planned} skipped=${tally.skipped} deferred=${tally.deferred} failed=${tally.failed}`,
+        detail: `planned=${tally.planned} skipped=${tally.skipped} deferred=${tally.deferred} failed=${tally.failed} reviewer-deferred=${tally.reviewerDeferred}`,
         counts: tally,
       };
     },

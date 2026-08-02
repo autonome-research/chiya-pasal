@@ -114,7 +114,7 @@ async function runForTenant(
   const runner = new JobRunner(store, { heartbeatMs: 30_000 });
 
   const phases = [
-    loadContext(vault),
+    loadContext(vault, env.interests),
     loadArticles(articleStore),
     prioritize(fastClient, env.fast.model),
     draftSections(fastClient, env.fast.model),

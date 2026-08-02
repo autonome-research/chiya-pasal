@@ -11,6 +11,18 @@
  *   npm run admin -- users pause <handle>
  *   npm run admin -- users resume <handle>
  *   npm run admin -- users remove <handle> [--purge]
+ *   npm run admin -- requeue --user <handle> --status failed|skipped \
+ *       [--like <pattern>] [--execute]
+ *   npm run admin -- requeue-shared [--execute]
+ *
+ * `requeue` returns terminal rows in a user's ArticleStore to 'pending'.
+ * Default is a dry-run that prints the status_reason histogram of what
+ * would be requeued; --execute performs the reset.
+ *
+ * `requeue-shared` returns shared-cache rows that failed on TRANSIENT
+ * summarize errors (connection/timeout/5xx) to their pre-summarize status
+ * so the next tick retries them. Terminal failures are left alone. Same
+ * dry-run-by-default contract.
  *
  * The CLI mutates config/users.yaml (comment-preserving) and manages the
  * per-user directory skeleton under CHIYA_DATA_ROOT. It does NOT create
@@ -26,12 +38,23 @@ import { pathToFileURL } from 'url';
 import { ArticleStore } from './shared/article-store.js';
 import { envFromUser } from './shared/env.js';
 import {
+  isTransientFailureReason,
+  SharedArticleStore,
+} from './shared/shared-article-store.js';
+import {
   defaultUsersConfigPath,
   loadUsersConfig,
   type User,
   type UsersConfig,
 } from './shared/users.js';
-import { addUser, removeUser, setUserEnabled, type NewUserInput } from './shared/users-admin.js';
+import {
+  addUser,
+  formatReasonHistogram,
+  parseRequeueArgs,
+  removeUser,
+  setUserEnabled,
+  type NewUserInput,
+} from './shared/users-admin.js';
 
 function usersFilePath(): string {
   return defaultUsersConfigPath();
@@ -222,11 +245,98 @@ function cmdRemove(handle: string, purge: boolean): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// requeue — return terminal ArticleStore rows to 'pending'.
+// ---------------------------------------------------------------------------
+
+function cmdRequeue(argv: string[]): void {
+  const req = parseRequeueArgs(argv);
+  const config = loadUsersConfig();
+  // Paused users included deliberately — requeue is data repair, and a
+  // paused tenant's queue should be fixable before resuming them.
+  const user = config.users.find((u) => u.handle === req.handle);
+  if (!user) fail(`no user with handle '${req.handle}'`);
+  const dbPath = join(envFromUser(user).vaultDir, '.chiya-pipelines.db');
+  if (!existsSync(dbPath)) fail(`no ArticleStore db for '${req.handle}' at ${dbPath}`);
+
+  const filter = {
+    status: req.status,
+    ...(req.likeReason !== null ? { likeReason: req.likeReason } : {}),
+  };
+  const store = new ArticleStore(dbPath);
+  try {
+    if (!req.execute) {
+      const histogram = store.reasonHistogram(filter);
+      const total = histogram.reduce((n, e) => n + e.count, 0);
+      console.log(
+        `dry-run: would requeue ${total} '${req.status}' article(s) for '${req.handle}'` +
+          (req.likeReason !== null ? ` matching reason LIKE ${req.likeReason}` : ''),
+      );
+      for (const line of formatReasonHistogram(histogram)) console.log(line);
+      if (total > 0) console.log('re-run with --execute to requeue.');
+      return;
+    }
+    const requeued = store.requeueByStatus(filter);
+    console.log(`requeued ${requeued} '${req.status}' article(s) to pending for '${req.handle}'`);
+  } finally {
+    store.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// requeue-shared — return transient-failed shared-cache rows for retry.
+// ---------------------------------------------------------------------------
+
+function cmdRequeueShared(argv: string[]): void {
+  const execute = argv.includes('--execute');
+  const dbPath = join(dataRoot(), 'shared', 'articles.db');
+  if (!existsSync(dbPath)) fail(`no shared cache db at ${dbPath}`);
+
+  const store = new SharedArticleStore(dbPath);
+  try {
+    if (!execute) {
+      const failed = store.listByStatus('failed', 10_000);
+      const transient = failed.filter(
+        (r) => r.statusReason !== null && isTransientFailureReason(r.statusReason),
+      );
+      console.log(
+        `dry-run: would requeue ${transient.length} of ${failed.length} failed shared article(s)` +
+          ' (transient summarize errors only)',
+      );
+      for (const r of transient.slice(0, 20)) {
+        console.log(`  ${r.stableId}  ${r.statusReason?.slice(0, 80)}`);
+      }
+      if (transient.length > 0) console.log('re-run with --execute to requeue.');
+      return;
+    }
+    const requeued = store.requeueTransientFailures();
+    console.log(`requeued ${requeued} transient-failed shared article(s) for retry`);
+  } finally {
+    store.close();
+  }
+}
+
 function main(): void {
   const [domain, action, ...rest] = process.argv.slice(2);
+  if (domain === 'requeue-shared') {
+    try {
+      return cmdRequeueShared([action, ...rest].filter((a): a is string => a !== undefined));
+    } catch (err) {
+      fail(err instanceof Error ? err.message : String(err));
+    }
+  }
+  if (domain === 'requeue') {
+    try {
+      return cmdRequeue([action, ...rest].filter((a): a is string => a !== undefined));
+    } catch (err) {
+      fail(err instanceof Error ? err.message : String(err));
+    }
+  }
   if (domain !== 'users' || !action) {
     console.error(
       'Usage: admin.ts users <list|show|add|pause|resume|remove> [args]\n' +
+        '       admin.ts requeue --user <handle> --status failed|skipped [--like <pattern>] [--execute]\n' +
+        '       admin.ts requeue-shared [--execute]\n' +
         'See the file docstring for full flag reference.',
     );
     process.exit(2);

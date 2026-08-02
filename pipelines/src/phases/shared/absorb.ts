@@ -50,6 +50,8 @@ export const absorbInbox = (
     let inserted = 0;
     let duplicates = 0;
     let skippedNoUrl = 0;
+    let skippedError = 0;
+    const errors: string[] = [];
 
     for (const file of files) {
       const text = await inboxFs.read(file);
@@ -63,21 +65,30 @@ export const absorbInbox = (
           skippedNoUrl++;
           continue;
         }
-        const result = store.upsertCollected({
-          stableId: stableIdToFilename(sid),
-          url,
-          title: a.title,
-          source: a.source,
-          field: a.field,
-          queryLabels: a.field ? [a.field] : [],
-          abstract: a.snippet,
-        });
-        if (result === 'inserted') inserted++;
-        else duplicates++;
+        // One bad row must never wedge the tick: each upsert is its own
+        // sqlite statement (atomic), so a throw here skips only this article
+        // and a re-parse after a crash dedups cleanly.
+        try {
+          const result = store.upsertCollected({
+            stableId: stableIdToFilename(sid),
+            url,
+            title: a.title,
+            source: a.source,
+            field: a.field,
+            queryLabels: a.field ? [a.field] : [],
+            abstract: a.snippet,
+          });
+          if (result === 'inserted') inserted++;
+          else duplicates++;
+        } catch (e) {
+          skippedError++;
+          const msg = e instanceof Error ? e.message : String(e);
+          errors.push(`${url}: ${msg}`.slice(0, 200));
+        }
       }
 
-      // Archive after successful parse+store so a crash mid-file re-parses
-      // (idempotent) rather than losing the file.
+      // Archive only after every row was handled so a crash mid-file
+      // re-parses (idempotent) rather than losing the file.
       const src = join(inboxFs.rootDir, file);
       const dst = join(inboxFs.rootDir, 'archive', file);
       await mkdir(dirname(dst), { recursive: true });
@@ -91,11 +102,15 @@ export const absorbInbox = (
       };
     }
 
-    ctx.absorbCounts = { files: files.length, parsed, inserted, duplicates, skippedNoUrl };
+    ctx.absorbCounts = { files: files.length, parsed, inserted, duplicates, skippedNoUrl, skippedError };
+    const errorSuffix =
+      errors.length > 0 ? ` — errors: ${errors.slice(0, 3).join('; ')}` : '';
     yield {
       type: 'phase',
       phase: 'absorb-inbox',
-      detail: `${files.length} files / ${parsed} parsed / ${inserted} new / ${duplicates} dup / ${skippedNoUrl} no-url`,
+      detail:
+        `${files.length} files / ${parsed} parsed / ${inserted} new / ${duplicates} dup / ` +
+        `${skippedNoUrl} no-url / ${skippedError} error${errorSuffix}`,
       counts: ctx.absorbCounts,
     };
   },

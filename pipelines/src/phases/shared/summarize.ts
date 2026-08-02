@@ -16,14 +16,18 @@ import { boundedFanout } from 'thread-phase/patterns';
 import type OpenAI from 'openai';
 
 import type { SharedPipelineCtx } from '../../shared/shared-pipeline-types.js';
-import type {
-  QualityAssessment,
-  SharedArticleRow,
-  SharedArticleStore,
+import {
+  isTransientFailureReason,
+  type QualityAssessment,
+  type SharedArticleRow,
+  type SharedArticleStore,
 } from '../../shared/shared-article-store.js';
 
 const SUMMARIZE_CONCURRENCY = 4;
 const SUMMARIZE_BATCH = 20;
+
+/** Transient failures leave the row retryable until this many attempts. */
+const MAX_SUMMARIZE_ATTEMPTS = 3;
 
 /** Prompt-input cap. qwen36's window is 131K; this is latency discipline,
  *  not necessity. ~10K tokens of source text. */
@@ -192,7 +196,7 @@ export const summarizeEnriched = (
     const batch = [...enriched, ...fallback];
 
     if (batch.length === 0) {
-      ctx.summarizeCounts = { summarized: 0, failed: 0, noText: 0, rejected: 0 };
+      ctx.summarizeCounts = { summarized: 0, failed: 0, noText: 0, rejected: 0, retryLater: 0 };
       yield { type: 'phase', phase: 'shared-summarize', detail: 'nothing to summarize' };
       return;
     }
@@ -201,6 +205,7 @@ export const summarizeEnriched = (
     let failed = 0;
     let noText = 0;
     let rejected = 0;
+    let retryLater = 0;
 
     const results = await boundedFanout({
       items: batch,
@@ -217,11 +222,20 @@ export const summarizeEnriched = (
       const r = results[i]!;
       const article = batch[i]!;
       if (!r.ok) {
-        // Aborts (deadline) leave the row in place for the next cycle;
-        // real failures are recorded.
+        // Aborts (deadline) leave the row in place for the next cycle
+        // without consuming an attempt. Transient faults (network/provider
+        // errors, including the LLM layer's {"_error":true} text payloads)
+        // also leave the status untouched so the next tick retries — up to
+        // the attempt cap, after which they fail for real. Everything else
+        // (structure violations, non-retryable 4xx) is terminal.
         if (r.error.name !== 'AbortError') {
-          store.markFailed(article.stableId, `summarize: ${r.error.message.slice(0, 200)}`);
-          failed++;
+          const attempts = store.incrementSummarizeAttempts(article.stableId);
+          if (isTransientFailureReason(r.error.message) && attempts < MAX_SUMMARIZE_ATTEMPTS) {
+            retryLater++;
+          } else {
+            store.markFailed(article.stableId, `summarize: ${r.error.message.slice(0, 200)}`);
+            failed++;
+          }
         }
         continue;
       }
@@ -242,12 +256,12 @@ export const summarizeEnriched = (
       summarized++;
     }
 
-    ctx.summarizeCounts = { summarized, failed, noText, rejected };
+    ctx.summarizeCounts = { summarized, failed, noText, rejected, retryLater };
     yield {
       type: 'phase',
       phase: 'shared-summarize',
-      detail: `summarized=${summarized} rejected=${rejected} failed=${failed} no-text=${noText}`,
-      counts: { summarized, rejected, failed, noText },
+      detail: `summarized=${summarized} rejected=${rejected} failed=${failed} no-text=${noText} retry-later=${retryLater}`,
+      counts: { summarized, rejected, failed, noText, retryLater },
     };
   },
 });

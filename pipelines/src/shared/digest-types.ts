@@ -12,7 +12,6 @@ export type Bucket = 'focus' | 'notable' | 'followup' | 'skip';
 export interface VaultContext {
   claudeMd: string;
   tasteMd: string;
-  indexMd: string;
   /** Tail of log.md — recent activity for the librarian-update section. */
   logTail: string;
   /** Each file in wiki/user/focuses/ — current high-priority interests. */
@@ -21,6 +20,12 @@ export interface VaultContext {
   research: Array<{ path: string; content: string }>;
   profile: string | null;
   interests: string | null;
+  /** Interest paragraphs from the tenant registry (users.yaml → env.interests).
+   *  Empty when single-tenant or the user has none configured. */
+  interestParagraphs: string[];
+  /** Topic page slugs (wiki/topics/*.md basenames, flat tree), most recently
+   *  modified first, capped by count and joined-char budget in load-context. */
+  topicSlugs: string[];
 }
 
 export interface ClassifiedArticle {
