@@ -164,6 +164,25 @@ const PER_ARTICLE_CONCURRENCY = 4;
  *  guard is defense in depth so such a payload is never planned from. */
 const ERROR_BLOB_RE = /^\s*\{"_error"\s*:\s*true/;
 
+/**
+ * A row whose body is empty or an error blob cannot be planned — and, unlike
+ * a reviewer failure, retrying cannot help: nothing in the librarian fetches
+ * or summarizes text (enrichment lives upstream in the shared pipeline). So
+ * this deferral is PERMANENT and apply must retire the row from the queue.
+ *
+ * Returning such a row to 'pending' deadlocks the librarian: `listPending`
+ * orders oldest-first, so a block of body-less legacy rows at the head is
+ * re-pulled and re-deferred every run while healthy articles behind them
+ * never load. Recover a cohort with
+ * `admin requeue --user <h> --status skipped --like 'summary-unavailable%'`
+ * once their bodies have been restored upstream.
+ */
+export const SUMMARY_UNAVAILABLE_REASON = 'summary-unavailable';
+
+export function isPermanentDeferReason(reason: string | null | undefined): boolean {
+  return reason === SUMMARY_UNAVAILABLE_REASON;
+}
+
 export const planArticleTree =
   (
     clients: PerArticleClients,
@@ -236,7 +255,7 @@ export const planArticleTree =
             return {
               articleId: article.id,
               outcome: 'deferred',
-              reason: 'summary-unavailable',
+              reason: SUMMARY_UNAVAILABLE_REASON,
             };
           }
 

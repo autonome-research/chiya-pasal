@@ -220,6 +220,26 @@ describe('applyArticlePlans reviewer-failure deferral', () => {
     expect((events.at(-1) as { detail: string }).detail).toContain('reviewer-deferred=1');
   });
 
+  it('retires a summary-unavailable deferral from the queue instead of deadlocking it', async () => {
+    // Regression: body-less legacy rows returned to pending sat at the head of
+    // the oldest-first batch and were re-pulled every run, so 5,964 healthy
+    // articles behind them never loaded. Retrying cannot help — the librarian
+    // never fetches or summarizes text — so the row must leave 'pending'.
+    const a = insertArticle('Body-less paper', 'https://arxiv.org/abs/2605.00013');
+
+    const ctx = ctxWith([
+      { articleId: a.id, outcome: 'deferred', reason: 'summary-unavailable' },
+    ]);
+    await drain(applyArticlePlans(vault, store).run(ctx));
+
+    expect(ctx.results?.[0]).toMatchObject({ outcome: 'skipped', reason: 'summary-unavailable' });
+    const row = store.getById(a.id)!;
+    expect(row.status).toBe('skipped');
+    expect(row.statusReason).toBe('summary-unavailable');
+    // Recoverable by cohort once bodies are restored upstream.
+    expect(store.listPending(10).map((r) => r.id)).not.toContain(a.id);
+  });
+
   it('non-reviewer deferrals still return to pending without touching status_reason', async () => {
     const a = insertArticle('Rolled paper', 'https://arxiv.org/abs/2605.00011');
 

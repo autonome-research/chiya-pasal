@@ -32,6 +32,7 @@ import {
   reviewerFailureAttempts,
   type GatedRecommendations,
 } from './reviewer.js';
+import { isPermanentDeferReason } from './librarian-planner.js';
 
 /** Sink for unresolved-citation demand (tier 2 of citation completion).
  *  Wired to the shared cache's ledger by the entry point; absent in tests
@@ -542,6 +543,20 @@ export const applyArticlePlans = (
         // restores 'pending' without clearing it.
         if (isReviewerFailureReason(result.reason)) {
           store.markSkipped(result.articleId, result.reason.slice(0, 200));
+        }
+        // A permanent deferral must LEAVE the queue: retrying cannot help, and
+        // returning it to pending puts it straight back at the head of the
+        // oldest-first batch, blocking every healthy article behind it.
+        if (isPermanentDeferReason(result.reason)) {
+          store.markSkipped(result.articleId, result.reason.slice(0, 200));
+          results.push({
+            articleId: result.articleId,
+            outcome: 'skipped',
+            reason: result.reason,
+            topicPagePaths: [],
+            backlinkPagePaths: [],
+          });
+          continue;
         }
         store.markPending(result.articleId);
         results.push({
