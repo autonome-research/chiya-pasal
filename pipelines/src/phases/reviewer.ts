@@ -265,6 +265,22 @@ export type ReviewerAgentFn = (
   signal?: AbortSignal,
 ) => Promise<{ text: string; finishReason: string; toolRounds: number }>;
 
+/**
+ * Output-token budget for the reviewer.
+ *
+ * 2500 was sized for a non-reasoning model and before the topic vocabulary
+ * (up to 6k chars of slugs) entered the prompt: qwen3 reasons over which of
+ * ~2.6k topics fit, and the hidden reasoning pass consumed the whole cap
+ * before any JSON appeared — 31 articles deferred on `truncated` in one
+ * evening, which is the very uncategorized-filing failure the vocabulary was
+ * added to prevent. Matches the digest's fast-tier cap; override for
+ * thriftier non-reasoning models.
+ */
+const REVIEWER_MAX_TOKENS = Math.max(
+  1000,
+  Number(process.env.CHIYA_REVIEWER_MAX_TOKENS ?? '5000') || 5000,
+);
+
 const defaultAgentFn: ReviewerAgentFn = async (systemPrompt, userMessage, registry, clients, signal) => {
   const r = await runAgentWithTools(
     {
@@ -273,7 +289,7 @@ const defaultAgentFn: ReviewerAgentFn = async (systemPrompt, userMessage, regist
       model: clients.model,
       tools: registry.definitions(),
       maxToolRounds: 6,
-      maxTokens: 2500,
+      maxTokens: REVIEWER_MAX_TOKENS,
     },
     [{ role: 'user', content: userMessage }],
     {
