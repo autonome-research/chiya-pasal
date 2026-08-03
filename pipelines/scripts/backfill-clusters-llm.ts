@@ -49,6 +49,7 @@ import { join } from 'path';
 import OpenAI from 'openai';
 import { runAgentWithTools, type ToolExecutor } from 'thread-phase';
 
+import { CLUSTER_BACKFILL_MAX_TOKENS } from '../src/shared/agent-budgets.js';
 import { loadChiyaEnvFor, type InferenceTarget } from '../src/shared/env.js';
 import {
   invalid,
@@ -288,16 +289,11 @@ export type ClusterAgentFn = (
 ) => Promise<{ text: string; finishReason: string | null }>;
 
 /**
- * Output budget for one batch. A 30-topic batch answers in roughly 1.5 KB of
- * JSON, but the fast tier is a reasoning model that spends the first chunk of
- * its budget thinking — an undersized cap truncates before any JSON appears
- * and every batch is skipped. Sized with headroom; override for thriftier
- * non-reasoning models.
+ * Back-compat alias. The budget itself, and the reason it is 6000, now live
+ * with every other agent budget in src/shared/agent-budgets.ts.
+ * CHIYA_CLUSTER_BACKFILL_MAX_TOKENS still overrides it.
  */
-export const CLUSTER_MAX_TOKENS = Math.max(
-  1024,
-  Number(process.env.CHIYA_CLUSTER_BACKFILL_MAX_TOKENS ?? '6000') || 6000,
-);
+export const CLUSTER_MAX_TOKENS = CLUSTER_BACKFILL_MAX_TOKENS;
 
 // This agent classifies and has no callable tools.
 const noTools: ToolExecutor = {
@@ -315,7 +311,7 @@ export function makeClusterAgentFn(client: OpenAI, model: string): ClusterAgentF
         model,
         tools: [],
         maxToolRounds: 1,
-        maxTokens: CLUSTER_MAX_TOKENS,
+        maxTokens: CLUSTER_BACKFILL_MAX_TOKENS,
       },
       [{ role: 'user', content: userMessage }],
       { client, toolExecutor: noTools },

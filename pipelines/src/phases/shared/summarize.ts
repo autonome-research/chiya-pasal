@@ -15,6 +15,7 @@ import { runAgentWithTools, type Phase } from 'thread-phase';
 import { boundedFanout } from 'thread-phase/patterns';
 import type OpenAI from 'openai';
 
+import { SHARED_SUMMARIZE_MAX_TOKENS } from '../../shared/agent-budgets.js';
 import type { SharedPipelineCtx } from '../../shared/shared-pipeline-types.js';
 import {
   isTransientFailureReason,
@@ -151,9 +152,9 @@ export const callRichSummary: SharedSummarizer = async (article, clients, signal
       model: clients.model,
       tools: [],
       maxToolRounds: 1,
-      // Well past any sane summary; only genuine runaway output trips the
-      // truncation backstop below.
-      maxTokens: 8000,
+      // Runaway-output backstop, not a fit to expected length — only
+      // genuine runaway trips the truncation check below.
+      maxTokens: SHARED_SUMMARIZE_MAX_TOKENS,
     },
     [
       {

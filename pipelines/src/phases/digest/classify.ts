@@ -4,6 +4,7 @@ import { requireCtx, runAgentWithTools, type Phase } from 'thread-phase';
 import { boundedFanout } from 'thread-phase/patterns';
 import type OpenAI from 'openai';
 
+import { DIGEST_CLASSIFY_MAX_TOKENS } from '../../shared/agent-budgets.js';
 import { type Article } from '../../shared/article.js';
 import type {
   Bucket,
@@ -19,7 +20,7 @@ import {
   valid,
   type Validator,
 } from '../../shared/llm-schema.js';
-import { FAST_MAX_TOKENS, noTools } from './common.js';
+import { noTools } from './common.js';
 
 const CLASSIFIER_BUCKETS = `Buckets:
 - "focus":     directly hits one of the user's listed focuses or active research projects.
@@ -134,7 +135,7 @@ export const prioritize =
               model,
               tools: [],
               maxToolRounds: 1,
-              maxTokens: FAST_MAX_TOKENS,
+              maxTokens: DIGEST_CLASSIFY_MAX_TOKENS,
             },
             [{ role: 'user', content: buildClassifierUserMessage(article) }],
             { client, toolExecutor: noTools, cache: ctx.cache, signal: ctx.signal },

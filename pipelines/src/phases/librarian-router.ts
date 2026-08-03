@@ -12,6 +12,7 @@
 import { runAgentWithTools } from 'thread-phase';
 import type OpenAI from 'openai';
 
+import { ROUTER_MAX_TOKENS } from '../shared/agent-budgets.js';
 import type { ArticleRow } from '../shared/article-store.js';
 import type { ExtractedRefs } from '../shared/librarian-types.js';
 import {
@@ -101,7 +102,7 @@ const defaultAgentFn: RouterAgentFn = async (systemPrompt, userMessage, clients,
       model: clients.model,
       tools: [],
       maxToolRounds: 1,
-      maxTokens: 800,
+      maxTokens: ROUTER_MAX_TOKENS,
     },
     [{ role: 'user', content: userMessage }],
     {

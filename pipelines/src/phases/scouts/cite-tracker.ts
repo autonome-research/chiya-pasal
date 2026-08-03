@@ -15,6 +15,7 @@
 import { runAgentWithTools, ToolRegistry } from 'thread-phase';
 import type OpenAI from 'openai';
 
+import { CITE_TRACKER_MAX_TOKENS } from '../../shared/agent-budgets.js';
 import type { ArticleRow, ArticleStore } from '../../shared/article-store.js';
 import type { ExtractedRefs } from '../../shared/librarian-types.js';
 import { registerArticleLookupTools } from '../../tools/article-lookup.js';
@@ -73,7 +74,6 @@ export interface ResolvedCandidate {
 // assess relationships; the candidate source pages carry the substance.
 const BODY_CAP = 4000;
 const MAX_TOOL_ROUNDS = 12;
-const MAX_TOKENS = 2000;
 const MAX_SURFACED_PAGES = 6;
 
 const SYSTEM_PROMPT = `You are the wiki CITE-TRACKER for the chiya research library.
@@ -207,7 +207,7 @@ const defaultAgentFn: CiteAgentFn = async (
       model: clients.model,
       tools: registry.definitions(),
       maxToolRounds: MAX_TOOL_ROUNDS,
-      maxTokens: MAX_TOKENS,
+      maxTokens: CITE_TRACKER_MAX_TOKENS,
     },
     [{ role: 'user', content: userMessage }],
     {

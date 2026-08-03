@@ -3,13 +3,14 @@
 import { requireCtx, runAgentWithTools, type Phase } from 'thread-phase';
 import type OpenAI from 'openai';
 
+import { DIGEST_DRAFT_LADDER } from '../../shared/agent-budgets.js';
 import type {
   ClassifiedArticle,
   DigestCtx,
   DigestSection,
   VaultContext,
 } from '../../shared/digest-types.js';
-import { FAST_MAX_TOKENS, noTools } from './common.js';
+import { noTools } from './common.js';
 
 const SECTION_SYSTEM = `You are a research-digest writer. Given a list of pre-classified articles for ONE section, write a tight scannable list of 1-line entries.
 
@@ -138,7 +139,9 @@ function draftOneSection(
  *
  * Truncation must never sink the whole digest: retry once with double the
  * budget (reasoning models occasionally burn the cap on hidden reasoning),
- * then fall back to a deterministic rendering of the classifier output.
+ * then fall back to a deterministic rendering of the classifier output. The
+ * ladder itself lives in src/shared/agent-budgets.ts — reaching its second
+ * rung at all means DIGEST_DRAFT_MAX_TOKENS is stale for the current model.
  */
 export async function draftOneSectionWith(
   bucketLabel: string,
@@ -147,7 +150,7 @@ export async function draftOneSectionWith(
 ): Promise<SectionDraft> {
   if (classified.length === 0) return { body: '_Nothing this cycle._' };
 
-  for (const maxTokens of [FAST_MAX_TOKENS, FAST_MAX_TOKENS * 2]) {
+  for (const maxTokens of DIGEST_DRAFT_LADDER) {
     const r = await agentFn(maxTokens);
     if (r.finishReason !== 'length' && r.text.trim()) {
       return { body: r.text.trim() };

@@ -69,6 +69,8 @@ The default `localhost:11435` is the SSH tunnel installed via `chiya-tunnel-tiny
 set -a && source .env && set +a   # systemd loads this automatically
 
 npm run doctor -- --no-network    # validate env/vault/db/git without inference HTTP checks
+npm run doctor:offline            # same thing, cron/pre-deploy friendly
+npm run budgets                   # effective agent output-token caps + which are env-overridden
 npm run status                    # article status counts + recent jobs
 npm run intake                    # tsx src/intake.ts
 npm run librarian                 # tsx src/librarian.ts
@@ -93,6 +95,23 @@ The last three are operator one-shots, not scheduled jobs: each defaults to a dr
 prints a one-line JSON summary, and never touches git.
 
 Each pipeline run logs every event to stdout. Persisted job + event log lives in `$THREAD_PHASE_DB`. Inspect with sqlite directly or via thread-phase's `JobStore.getJob` / `getEvents`. `npm run doctor` exits nonzero only for failed checks; warnings cover optional/non-blocking issues such as skipped network checks or a dirty vault worktree.
+
+### What doctor checks
+
+| Check | Network? | What it catches |
+| --- | --- | --- |
+| `email`, `vault`, `git`, `db` | no | Unset `CHIYA_EMAIL_TO`, missing vault, non-repo, missing/half-built pipeline DB |
+| `truncation` | no | **Silent degradation.** Reads the JobStore `event` log and `article.status_reason` and reports each agent's truncation rate. WARN at 10%, FAIL at 35%, no escalation below 10 units. The window is **per agent** (each agent's most recent 40 runs) — a global row window is ~99% librarian and hides the twice-daily digest entirely |
+| `budgets` | no | Prints every effective agent output-token cap; WARNs if any is env-overridden, since an override outlives the reason for it |
+| `fast-inference`, `tools-inference`, `tools-model` | yes | Endpoint reachable, and the configured model id is actually one the endpoint serves |
+| `tool-calling` | yes | A real tool-call round trip. A 200 answering in **prose** is a FAIL — that is the :8000 wrapper failure mode that made scouts confabulate for a week |
+| `vision` | yes | Multimodality, probed with a generated 64x64 PNG. INFO either way. Deliberately not a 1x1 pixel: that crashed the VL preprocessor once and the crash was recorded as "model is not multimodal" |
+
+`truncation` and `budgets` are two halves of one question — *is an agent hitting its ceiling, and what is that ceiling?* — so they run together and both work offline. Silent degradation does not need a network to happen.
+
+### Agent output-token budgets
+
+Every `maxTokens` in the pipelines lives in `src/shared/agent-budgets.ts`, one named export per agent role, each with a `CHIYA_<ROLE>_MAX_TOKENS` override, a floor, and a comment saying why the number holds and what would invalidate it. `__tests__/agent-budgets.test.ts` fails the build if a numeric `maxTokens` literal reappears at any call site, or if a new file calls `runAgentWithTools` without importing a budget. Run `npm run budgets` to see the effective values, or `npm run test:guards` for the check alone (~15ms). **Re-read that module whenever the inference target changes** — a reasoning model spends the front of its budget on a hidden pass, which is how the digest ran for weeks on caps sized for a non-reasoning model. See `docs/developer-guide.md` for how to add one.
 
 ## systemd install
 

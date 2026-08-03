@@ -8,6 +8,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
+    "test:guards": "vitest run __tests__/agent-budgets.test.ts",
     "typecheck": "tsc --noEmit",
     "digest:am": "tsx src/digest.ts AM",
     "digest:pm": "tsx src/digest.ts PM",
@@ -17,6 +18,8 @@
     "shared": "tsx src/shared-pipeline.ts",
     "demand-ingest": "tsx src/demand-ingest.ts",
     "doctor": "tsx src/doctor.ts",
+    "doctor:offline": "tsx src/doctor.ts --no-network",
+    "budgets": "tsx scripts/show-budgets.ts",
     "status": "tsx src/status.ts",
     "admin": "tsx src/admin.ts",
     "migrate-queue": "tsx scripts/migrate-queue.ts",

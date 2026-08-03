@@ -12,6 +12,7 @@
 import { runAgentWithTools, ToolRegistry } from 'thread-phase';
 import type OpenAI from 'openai';
 
+import { TOPIC_SCOUT_MAX_TOKENS } from '../../shared/agent-budgets.js';
 import type { ArticleRow } from '../../shared/article-store.js';
 import { registerReadOnlyVaultTools, type VaultFs } from '../../tools/vault.js';
 import type { ScoutOutput } from './types.js';
@@ -60,7 +61,6 @@ export type ScoutAgentFn = (
 // across the four parallel scouts; a fixed cap keeps the prefix stable.
 const BODY_CAP = 8000;
 const MAX_TOOL_ROUNDS = 10;
-const MAX_TOKENS = 2000;
 const MAX_SURFACED_PAGES = 5;
 
 const SYSTEM_PROMPT = `You are the wiki TOPIC-SCOUT for the chiya research library.
@@ -146,7 +146,7 @@ const defaultAgentFn: ScoutAgentFn = async (
       model: clients.model,
       tools: registry.definitions(),
       maxToolRounds: MAX_TOOL_ROUNDS,
-      maxTokens: MAX_TOKENS,
+      maxTokens: TOPIC_SCOUT_MAX_TOKENS,
     },
     [{ role: 'user', content: userMessage }],
     {

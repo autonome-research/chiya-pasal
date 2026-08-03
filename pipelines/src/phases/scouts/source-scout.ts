@@ -20,6 +20,7 @@
 import { runAgentWithTools, ToolRegistry } from 'thread-phase';
 import type OpenAI from 'openai';
 
+import { SOURCE_SCOUT_MAX_TOKENS } from '../../shared/agent-budgets.js';
 import type { ArticleRow, ArticleStore } from '../../shared/article-store.js';
 import type { VaultFs } from '../../tools/vault.js';
 import { registerArticleLookupTools } from '../../tools/article-lookup.js';
@@ -50,7 +51,6 @@ export type SourceScoutRunner = (
 
 const BODY_CAP = 8000;
 const MAX_TOOL_ROUNDS = 10;
-const MAX_TOKENS = 2000;
 const MAX_SURFACED = 4;
 
 const SOURCE_SCOUT_SYSTEM = `You are the wiki SOURCE-SCOUT for the chiya research library.
@@ -178,7 +178,7 @@ export async function callSourceScoutAgent(
       model: clients.model,
       tools: registry.definitions(),
       maxToolRounds: MAX_TOOL_ROUNDS,
-      maxTokens: MAX_TOKENS,
+      maxTokens: SOURCE_SCOUT_MAX_TOKENS,
     },
     [{ role: 'user', content: formatUserMessage(input) }],
     {

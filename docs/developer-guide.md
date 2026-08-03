@@ -90,6 +90,52 @@ Rules:
 - provide dependency injection seams for tests
 - test truncation, parse failure, empty results, and happy path
 
+## Agent token budgets
+
+Every output-token cap in the pipelines lives in `pipelines/src/shared/agent-budgets.ts`. Nothing else may name one.
+
+This is not tidiness. Four incidents in one week were the same bug: a numeric constant tuned for one dependency state, the dependency moved, the constant went silently wrong. Nothing throws — `finishReason` turns `'length'` and data quality degrades for weeks while every job reports COMPLETED.
+
+- digest classify/draft at 800/2500, sized for the non-reasoning gemma4:e4b. After the qwen3 switch the hidden reasoning pass ate the whole cap: classify force-skipped **every** article and draft threw.
+- the reviewer's hardcoded 2500 — same root cause, missed while fixing the first one, then made worse when a 6k-char topic vocabulary entered its prompt. 31 articles deferred on `truncated` in one evening, and the vocabulary added to *prevent* uncategorized filings was causing them.
+
+A cap tuned for a non-reasoning model is not "a bit tight" for a reasoning model. The reasoning pass runs *before* the first output token, so an undersized cap produces zero output, not short output.
+
+### Where they live
+
+`agent-budgets.ts` exports one named budget per agent role plus an `AGENT_BUDGETS` registry:
+
+| field | meaning |
+| --- | --- |
+| `value` | effective cap in this process (env override, then floor) |
+| `envVar` | `CHIYA_<ROLE>_MAX_TOKENS` |
+| `floor` | `Math.max` clamp — a typo'd env var cannot reintroduce the truncation bug |
+| `fallback` | compiled-in default |
+| `agentName` | the `name` passed to `runAgentWithTools`, i.e. what appears in the JobStore event log |
+| `why` / `invalidatedBy` | why the number holds, and what change makes it wrong |
+
+`invalidatedBy` is the field that matters. **On any model swap, read every `invalidatedBy` in the file.** That is the review step whose absence caused all four incidents.
+
+`npm run budgets` prints the effective values; `npm run doctor -- --no-network` reports them as the `budgets` check alongside `truncation`, which measures whether any agent is actually hitting its ceiling.
+
+### Adding an agent
+
+1. Add a role to `AgentRole`, a `resolveBudget(...)` export, and an `AGENT_BUDGETS` entry with a real `why` and `invalidatedBy` (the test rejects placeholder-length strings).
+2. Import the constant at the call site: `maxTokens: MY_AGENT_MAX_TOKENS`.
+3. Set `agentName` to the exact `name` you pass `runAgentWithTools`.
+
+### Why bare literals fail the test
+
+`__tests__/agent-budgets.test.ts` globs `src/**/*.ts` + `scripts/**/*.ts` (never a hand-maintained list, so a new agent file is covered the day it lands) and fails on:
+
+1. a numeric literal after `maxTokens:` anywhere outside the budgets module — reported as `file:line` with instructions;
+2. a file that calls `runAgentWithTools(` without importing from `agent-budgets.js` — an agent silently running on the adapter's default cap is the same failure with no constant left to grep for;
+3. an `agentName` in the registry that matches no agent in the sources, so a rename cannot leave a stale entry behind.
+
+The check takes ~15ms (`npm run test:guards`). If it fires, do not add an exemption — move the number.
+
+Note the regex is camelCase `maxTokens` only. `max_tokens` in `src/doctor.ts` is a raw OpenAI probe body, not a thread-phase agent budget. If a phase ever calls the OpenAI client directly, widen the pattern to `/\bmax_?[Tt]okens/` and exempt doctor explicitly.
+
 ## Topic registry and vocabulary
 
 `pipelines/src/shared/topic-registry.ts` owns the vault's topic vocabulary: one scan of `wiki/topics/*.md` produces a `TopicRegistry` value, which is rendered three ways — a human page, a machine document, and a char-budgeted block for agent prompts.
@@ -167,6 +213,7 @@ Before merging changes:
 cd pipelines
 npm run typecheck
 npm test
+npm run doctor:offline   # truncation rates + effective agent caps; no network, read-only
 ```
 
 For native binding issues after Node upgrades:
