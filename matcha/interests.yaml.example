@@ -1,0 +1,57 @@
+# Public template. Copy to interests.yaml and edit keywords.
+# Interest keywords for TrendRadar-inspired scoring
+# These keywords boost article scores when they appear in titles/descriptions
+
+interests:
+  # High priority: core AI topics (weight 10 per match)
+  core:
+    - "large language model"
+    - "llm"
+    - "gpt"
+    - "transformer"
+    - "reinforcement learning"
+    - "rlhf"
+    - "alignment"
+    - "agi"
+    - "reasoning"
+    - "chain of thought"
+    - "ai safety"
+    - "model context"
+    - "deep learning"
+    - "neural network"
+  # Medium priority: secondary topics (weight 5 per match)
+  secondary:
+    - "compute"
+    - "gpu"
+    - "chip"
+    - "semiconductor"
+    - "quantum computing"
+    - "robotics"
+    - "autonomous"
+    - "agent"
+    - "infrastructure"
+    - "data center"
+    - "cloud"
+    - "cybersecurity"
+    - "privacy"
+  # High value: specific people, companies, events
+  people:
+    - "yann lecun"
+    - "geoffrey hinton"
+    - "john schulman"
+    - "demis hassabis"
+  companies:
+    - "deepmind"
+    - "anthropic"
+    - "google"
+    - "meta"
+    - "microsoft"
+    - "openai"
+    - "xai"
+  # Trending events
+  events:
+    - "neurips"
+    - "icml"
+    - "acl"
+    - "cvpr"
+    - "iclr"
