@@ -1,8 +1,9 @@
-# Feed list + matcha RSS binary settings.
-# Paths below are placeholders (not a live machine). filter_matcha.py always
-# reads matcha/output/matcha-digest-YYYY-MM-DD.md; collect.sh invokes the
-# binary from matcha/scripts, so prefer an absolute path to this directory's
-# output/ in a real install. Do not commit /home/<user> paths.
+# Public template. Copy to config.yaml and edit feeds/paths.
+# markdown_dir_path must land RSS digests where filter_matcha.py reads them:
+#   matcha/output/matcha-digest-YYYY-MM-DD.md
+# collect.sh runs the RSS binary from matcha/scripts, so prefer an absolute
+# path to this directory's output/ in a real install. Do not commit machine
+# home paths (/home/velvet, …).
 markdown_dir_path: ./output
 feeds:
   # ===== Verified Working RSS Feeds =====

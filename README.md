@@ -51,11 +51,14 @@ Tenants are registered in `pipelines/config/users.yaml` and managed with
 
 ```
 chiya-library/
-├── README.md                    # This file
+├── README.md                    # This file (public Quick Start)
+├── LICENSE                      # MIT
 ├── AGENTS.md                    # Project intent and guidance for future agents
 ├── CONTRIBUTING.md              # Verification and contribution mechanics
-├── matcha/                      # Collection orchestration (shell + Go RSS reader)
-│   ├── config.yaml              # Feed URLs, limits, keywords
+├── matcha/                      # Collection orchestration (shell + RSS binary)
+│   ├── config.yaml.example      # Public template — copy to config.yaml
+│   ├── interests.yaml.example   # Public template — copy to interests.yaml
+│   ├── config.yaml              # Feed URLs (placeholder paths, not a live machine)
 │   ├── interests.yaml           # Interest keywords
 │   ├── scripts/
 │   │   ├── collect.sh           # Calls TS API ingest + RSS + filter
@@ -63,6 +66,7 @@ chiya-library/
 │   │   └── api_ingest.py        # Legacy Python API collector (not live)
 │   └── logs/                    # Collection logs
 └── pipelines/                   # Curation layer (TS, thread-phase)
+    ├── README.md               # Live-operator runbook (tiny-emerson, not public default)
     ├── src/
     │   ├── shared-pipeline.ts   # SHARED pipeline entry (absorb→enrich→summarize→route)
     │   ├── librarian.ts         # Per-user curation entry (multi-tenant loop)
@@ -94,41 +98,62 @@ The wiki is a separate repo (`~/vault`) — not vendored here. Sources live at `
 
 ## Quick Start
 
+This is the public setup path for a new clone. It does **not** assume the live Autonome Research machine (`tiny-emerson`, `--user velvet`, `chiya-tunnel-tiny.service`). That deployment is documented separately in [`pipelines/README.md`](pipelines/README.md) (operator runbook).
+
 ### Prerequisites
 - Node 20+
-- Python 3.10+
-- Go 1.21+ (to build the matcha binary)
+- Python 3.10+ (PyYAML — see `matcha/requirements.txt`)
+- A git remote for your vault (wiki repo, not this one)
+- Optional: a `matcha` RSS binary. This repository does **not** vendor Go sources (`matcha/` has no `.go` files or `go.mod`), so there is no in-repo `go build`. `collect.sh` looks for `matcha/bin/matcha` (gitignored) and runs `bin/matcha -c config.yaml`. If that file is missing, RSS is skipped; TypeScript API ingest still runs.
 
 ### Setup
 
 ```bash
 # 1. Clone
-git clone git@github.com:autonome-research/chiya-pasal.git ~/chiya-library
-cd ~/chiya-library
+git clone https://github.com/autonome-research/chiya-pasal.git
+cd chiya-pasal
+# operators often check this out as ~/chiya-library; any local path is fine
 
-# 2. Pipelines
+# 2. Pipelines (TypeScript curation layer)
 cd pipelines
 npm install
 npm run build
+# Point FAST_INFERENCE_* and TOOLS_INFERENCE_* at YOUR OpenAI-compatible
+# endpoint via pipelines/.env (gitignored). Do not use the tiny-emerson
+# localhost:11435 defaults unless you are on that machine — see
+# pipelines/README.md (operator runbook).
 
 # 3. Matcha collector
 cd ../matcha
-cp /path/to/matcha/bin/matcha bin/
-cp config.yaml.example config.yaml      # edit feeds
+mkdir -p bin output logs
+python3 -m pip install -r requirements.txt
+cp config.yaml.example config.yaml          # edit feeds
 cp interests.yaml.example interests.yaml
+# Set markdown_dir_path to this directory's output/ folder.
+# collect.sh invokes the RSS binary from matcha/scripts, so an absolute
+# path to matcha/output is safer than a relative one.
+# database_file_path can stay ./matcha.db (gitignored).
+#
+# RSS binary: collect.sh runs
+#   "$MATCHA_DIR/bin/matcha" -c "$MATCHA_DIR/config.yaml"
+# There is no Go module in this repo to build. If you have a matcha RSS
+# binary (invoked as `matcha -c config.yaml`), install it at bin/matcha.
+# If it is absent, collect.sh skips RSS and still runs API ingest + filter.
 
-# 4. Vault (separate repo, sibling of chiya-library by default)
+# 4. Vault (separate repo, sibling of this checkout by default)
 git clone <your-vault-remote> ~/vault
 # Edit ~/vault/TASTE.md, ~/vault/user/profile.md to taste
 
-# 5. matcha cron (collection every 4h)
+# 5. matcha cron (collection every 4h) — uses $HOME, not a hardcoded operator account
 crontab -e
-# 0 */4 * * * /home/$USER/chiya-library/matcha/scripts/collect.sh >> /home/$USER/chiya-library/matcha/logs/cron.log 2>&1
+# 0 */4 * * * "$HOME/chiya-pasal/matcha/scripts/collect.sh" >> "$HOME/chiya-pasal/matcha/logs/cron.log" 2>&1
+# Adjust the checkout path if you cloned elsewhere (operators: ~/chiya-library).
 
-# 6. Optional health check
-cd pipelines && npm run doctor -- --no-network
+# 6. Optional health check (no inference network)
+cd ../pipelines && npm run doctor -- --no-network
 
-# 7. systemd timers (curation). See pipelines/README.md for the install steps.
+# 7. systemd timers are the live-operator install, not required to build,
+#    test, or run pipelines by hand. See pipelines/README.md (runbook).
 ```
 
 ## Cadences
@@ -150,8 +175,9 @@ The digest commits and pushes the vault on every successful run. All steady-stat
 
 ## Pipeline detail
 
-See `pipelines/README.md` for systemd install steps, the per-pipeline phase composition, and operational notes.
+- **Public / new clone:** this Quick Start, then `cd pipelines && npm run doctor -- --no-network`. Run pipelines by hand against your own inference endpoint.
+- **Live operator runbook:** [`pipelines/README.md`](pipelines/README.md) — systemd units, tiny-emerson vllm tunnel, `--user velvet` one-shots. Do not treat that file as the default public path.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
