@@ -159,7 +159,7 @@ cd ../pipelines && npm run doctor -- --no-network
 ## Cadences
 
 | Layer | Trigger | Frequency |
-|---|---|
+|---|---|---|
 | matcha collect | Linux cron | every 4h at HH:00 |
 | shared pipeline | systemd timer | every 30 min at :07/:37 |
 | librarian (per user) | systemd timer | every 10 min |
